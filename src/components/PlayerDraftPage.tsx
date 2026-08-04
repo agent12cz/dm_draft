@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { doc, onSnapshot, runTransaction, serverTimestamp, Timestamp } from "firebase/firestore";
+import type { Timestamp } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
-import { db } from "@/lib/firebase";
+import { getFirebaseClient } from "@/lib/firebase";
 import { normalizeDraftItem } from "@/lib/snakeDraft";
 import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
@@ -137,52 +137,75 @@ export default function PlayerDraftPage() {
       return;
     }
 
-    const draftRef = doc(db, "drafts", code);
-    const unsubscribe = onSnapshot(
-      draftRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          const turnStartedAtValue = data.turnStartedAt;
+    let isMounted = true;
+    let unsubscribe: (() => void) | null = null;
 
-          setDraft({
-            id: snapshot.id,
-            title: data.title ?? "Bez názvu",
-            sport: data.sport ?? "NHL",
-            code: data.code ?? code,
-            status: data.status ?? "waiting",
-            productName: data.productName ?? "",
-            productSeason: data.productSeason ?? "",
-            productPrice: Number(data.productPrice ?? 0),
-            productImageUrl: data.productImageUrl ?? "",
-            boxCount: Number(data.boxCount ?? 0),
-            boxPrice: Number(data.boxPrice ?? 0),
-            margin: Number(data.margin ?? 0),
-            targetBreakPrice: Number(data.targetBreakPrice ?? 0),
-            participantCount: Number(data.participantCount ?? 0),
-            participants: (data.participants ?? []) as DraftParticipant[],
-            currentPickIndex: Number(data.currentPickIndex ?? 0),
-            pickOrder: (data.pickOrder ?? []) as number[],
-            draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
-            availableItemIds: (data.availableItemIds ?? []) as string[],
-            history: (data.history ?? []) as DraftHistoryItem[],
-            turnDurationSeconds: data.turnDurationSeconds === null ? null : Number(data.turnDurationSeconds ?? 15),
-            turnStartedAt: turnStartedAtValue instanceof Timestamp ? turnStartedAtValue : null,
-          });
-        } else {
-          setDraft(null);
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
+        if (!isMounted) {
+          return;
         }
 
-        setIsLoading(false);
-      },
-      (loadError) => {
-        console.error(loadError);
+        const draftRef = firestoreApi.doc(db, "drafts", code);
+        unsubscribe = firestoreApi.onSnapshot(
+          draftRef,
+          (snapshot) => {
+            if (snapshot.exists()) {
+              const data = snapshot.data();
+              const turnStartedAtValue = data.turnStartedAt;
+              const hasToDate = typeof turnStartedAtValue === "object"
+                && turnStartedAtValue !== null
+                && "toDate" in turnStartedAtValue
+                && typeof (turnStartedAtValue as { toDate?: unknown }).toDate === "function";
+
+              setDraft({
+                id: snapshot.id,
+                title: data.title ?? "Bez názvu",
+                sport: data.sport ?? "NHL",
+                code: data.code ?? code,
+                status: data.status ?? "waiting",
+                productName: data.productName ?? "",
+                productSeason: data.productSeason ?? "",
+                productPrice: Number(data.productPrice ?? 0),
+                productImageUrl: data.productImageUrl ?? "",
+                boxCount: Number(data.boxCount ?? 0),
+                boxPrice: Number(data.boxPrice ?? 0),
+                margin: Number(data.margin ?? 0),
+                targetBreakPrice: Number(data.targetBreakPrice ?? 0),
+                participantCount: Number(data.participantCount ?? 0),
+                participants: (data.participants ?? []) as DraftParticipant[],
+                currentPickIndex: Number(data.currentPickIndex ?? 0),
+                pickOrder: (data.pickOrder ?? []) as number[],
+                draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+                availableItemIds: (data.availableItemIds ?? []) as string[],
+                history: (data.history ?? []) as DraftHistoryItem[],
+                turnDurationSeconds: data.turnDurationSeconds === null ? null : Number(data.turnDurationSeconds ?? 15),
+                turnStartedAt: hasToDate ? (turnStartedAtValue as Timestamp) : null,
+              });
+            } else {
+              setDraft(null);
+            }
+
+            setIsLoading(false);
+          },
+          (loadError) => {
+            console.error(loadError);
+            setError("Nepodařilo se načíst draft z Firestore.");
+            setIsLoading(false);
+          },
+        );
+      } catch (initError) {
+        console.error(initError);
         setError("Nepodařilo se načíst draft z Firestore.");
         setIsLoading(false);
-      },
-    );
+      }
+    })();
 
-    return () => unsubscribe();
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
   }, [code]);
 
   useEffect(() => {
@@ -421,8 +444,9 @@ export default function PlayerDraftPage() {
     setError(null);
 
     try {
-      await runTransaction(db, async (transaction) => {
-        const draftRef = doc(db, "drafts", draft.id);
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.runTransaction(db, async (transaction) => {
+        const draftRef = firestoreApi.doc(db, "drafts", draft.id);
         const latestSnapshot = await transaction.get(draftRef);
 
         if (!latestSnapshot.exists()) {
@@ -489,11 +513,11 @@ export default function PlayerDraftPage() {
           availableItemIds: nextAvailableItemIds,
           history: nextHistory,
           turnDurationSeconds: latestData.turnDurationSeconds === null ? null : Number(latestData.turnDurationSeconds ?? 15),
-          updatedAt: serverTimestamp(),
+          updatedAt: firestoreApi.serverTimestamp(),
         } as Record<string, unknown>;
 
         if (nextStatus === "drafting") {
-          nextDraftUpdate.turnStartedAt = serverTimestamp();
+          nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
         }
 
         transaction.update(draftRef, nextDraftUpdate);

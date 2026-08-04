@@ -2,11 +2,10 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { doc, getDoc } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
-import { db } from "@/lib/firebase";
+import { getFirebaseClient } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 
 function JoinDraftPageContent() {
@@ -37,7 +36,8 @@ function JoinDraftPageContent() {
     }
 
     try {
-      const draftRef = await getDoc(doc(db, "drafts", normalizedCode));
+      const { db, firestoreApi } = await getFirebaseClient();
+      const draftRef = await firestoreApi.getDoc(firestoreApi.doc(db, "drafts", normalizedCode));
 
       if (!draftRef.exists()) {
         setVerifiedCode(null);

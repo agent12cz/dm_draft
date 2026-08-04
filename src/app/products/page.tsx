@@ -1,11 +1,10 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { addDoc, collection, doc, getDocs, serverTimestamp, updateDoc } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
-import { db } from "@/lib/firebase";
+import { getFirebaseClient } from "@/lib/firebase";
 import AuthGuard from "@/app/auth-guard";
 
 type Product = {
@@ -60,7 +59,8 @@ function ProductsPageContent() {
     setError(null);
 
     try {
-      const snapshot = await getDocs(collection(db, "products"));
+      const { db, firestoreApi } = await getFirebaseClient();
+      const snapshot = await firestoreApi.getDocs(firestoreApi.collection(db, "products"));
       const loadedProducts = snapshot.docs.map((document) => ({
         id: document.id,
         ...(document.data() as Omit<Product, "id">),
@@ -95,6 +95,7 @@ function ProductsPageContent() {
     setError(null);
 
     try {
+      const { db, firestoreApi } = await getFirebaseClient();
       const trimmedName = formValues.name.trim();
       const trimmedSeason = formValues.season.trim();
       const parsedPrice = Number(formValues.defaultPrice);
@@ -104,15 +105,15 @@ function ProductsPageContent() {
         return;
       }
 
-      await addDoc(collection(db, "products"), {
+      await firestoreApi.addDoc(firestoreApi.collection(db, "products"), {
         name: trimmedName,
         season: trimmedSeason,
         defaultPrice: parsedPrice,
         currency: "CZK",
         active: true,
         imageUrl: formValues.imageUrl.trim() || null,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        createdAt: firestoreApi.serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
 
       setFormValues(initialFormValues);
@@ -136,6 +137,7 @@ function ProductsPageContent() {
     setError(null);
 
     try {
+      const { db, firestoreApi } = await getFirebaseClient();
       const trimmedName = currentValue.name.trim();
       const trimmedSeason = currentValue.season.trim();
       const parsedPrice = Number(currentValue.defaultPrice);
@@ -144,14 +146,14 @@ function ProductsPageContent() {
         throw new Error("Název, sezóna a cena musí být vyplněny správně.");
       }
 
-      await updateDoc(doc(db, "products", productId), {
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "products", productId), {
         name: trimmedName,
         season: trimmedSeason,
         defaultPrice: parsedPrice,
         currency: "CZK",
         active: currentValue.active,
         imageUrl: currentValue.imageUrl.trim() || null,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
 
       await loadProducts();

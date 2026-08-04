@@ -1,16 +1,8 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut as firebaseSignOut,
-  updateProfile,
-  type User,
-} from "firebase/auth";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
-import { auth, db } from "@/lib/firebase";
+import type { User } from "firebase/auth";
+import { getFirebaseClient } from "@/lib/firebase";
 
 type UserProfile = {
   uid: string;
@@ -88,66 +80,83 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let isMounted = true;
+    let unsubscribeAuthListener: (() => void) | null = null;
 
-    const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
-      if (!isMounted) {
-        return;
-      }
-
-      setLoading(true);
-      setUser(nextUser);
-      setError(null);
-
-      if (!nextUser) {
-        setProfile(null);
-        setLoading(false);
-        return;
-      }
-
+    void (async () => {
       try {
-        const profileRef = doc(db, "users", nextUser.uid);
-        const profileSnapshot = await getDoc(profileRef);
+        const { auth, db, authApi, firestoreApi } = await getFirebaseClient();
 
-        if (!profileSnapshot.exists()) {
-          if (isRegisteringRef.current) {
+        if (!isMounted) {
+          return;
+        }
+
+        unsubscribeAuthListener = authApi.onAuthStateChanged(auth, async (nextUser) => {
+          if (!isMounted) {
+            return;
+          }
+
+          setLoading(true);
+          setUser(nextUser);
+          setError(null);
+
+          if (!nextUser) {
+            setProfile(null);
             setLoading(false);
             return;
           }
 
-          setProfile(null);
-          setError(PROFILE_MISSING_MESSAGE);
-          await firebaseSignOut(auth);
-          redirectToLoginWithMessage(PROFILE_MISSING_MESSAGE);
-          return;
-        }
+          try {
+            const profileRef = firestoreApi.doc(db, "users", nextUser.uid);
+            const profileSnapshot = await firestoreApi.getDoc(profileRef);
 
-        const profileData = profileSnapshot.data() as Partial<UserProfile>;
-        const resolvedDisplayName = profileData.displayName?.trim() || nextUser.displayName || nextUser.email || "Uživatel";
-        const resolvedEmail = profileData.email?.trim() || nextUser.email || "";
+            if (!profileSnapshot.exists()) {
+              if (isRegisteringRef.current) {
+                setLoading(false);
+                return;
+              }
 
-        setProfile({
-          uid: nextUser.uid,
-          displayName: resolvedDisplayName,
-          email: resolvedEmail,
-          role: getSafeRole(profileData.role),
-          createdAt: profileData.createdAt,
-          updatedAt: profileData.updatedAt,
+              setProfile(null);
+              setError(PROFILE_MISSING_MESSAGE);
+              await authApi.signOut(auth);
+              redirectToLoginWithMessage(PROFILE_MISSING_MESSAGE);
+              return;
+            }
+
+            const profileData = profileSnapshot.data() as Partial<UserProfile>;
+            const resolvedDisplayName = profileData.displayName?.trim() || nextUser.displayName || nextUser.email || "Uživatel";
+            const resolvedEmail = profileData.email?.trim() || nextUser.email || "";
+
+            setProfile({
+              uid: nextUser.uid,
+              displayName: resolvedDisplayName,
+              email: resolvedEmail,
+              role: getSafeRole(profileData.role),
+              createdAt: profileData.createdAt,
+              updatedAt: profileData.updatedAt,
+            });
+          } catch (profileError) {
+            console.error(profileError);
+            setProfile(null);
+            setError("Nepodařilo se načíst uživatelský profil.");
+            await authApi.signOut(auth);
+            redirectToLoginWithMessage("Nepodařilo se načíst uživatelský profil.");
+            return;
+          }
+
+          setLoading(false);
         });
-      } catch (profileError) {
-        console.error(profileError);
-        setProfile(null);
-        setError("Nepodařilo se načíst uživatelský profil.");
-        await firebaseSignOut(auth);
-        redirectToLoginWithMessage("Nepodařilo se načíst uživatelský profil.");
-        return;
+      } catch (initError) {
+        console.error(initError);
+        if (isMounted) {
+          setError("Nepodařilo se inicializovat autentizaci.");
+          setLoading(false);
+        }
       }
-
-      setLoading(false);
-    });
+    })();
 
     return () => {
       isMounted = false;
-      unsubscribe();
+      unsubscribeAuthListener?.();
     };
   }, []);
 
@@ -155,7 +164,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setError(null);
 
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      const { auth, authApi } = await getFirebaseClient();
+      await authApi.signInWithEmailAndPassword(auth, email, password);
       return true;
     } catch (signInError) {
       const message = getAuthErrorMessage(signInError);
@@ -168,12 +178,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setError(null);
     isRegisteringRef.current = true;
 
-    let credentials: Awaited<ReturnType<typeof createUserWithEmailAndPassword>>;
+    let credentials: { user: User };
     const trimmedEmail = email.trim();
     const trimmedDisplayName = displayName.trim();
 
     try {
-      credentials = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+      const { auth, authApi } = await getFirebaseClient();
+      credentials = await authApi.createUserWithEmailAndPassword(auth, trimmedEmail, password);
     } catch (signUpError) {
       const message = getAuthErrorMessage(signUpError);
       setError(message);
@@ -184,23 +195,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const nextDisplayName = trimmedDisplayName || credentials.user.email?.split("@")[0] || "Uživatel";
 
     try {
-      await updateProfile(credentials.user, {
+      const { auth, db, authApi, firestoreApi } = await getFirebaseClient();
+
+      await authApi.updateProfile(credentials.user, {
         displayName: nextDisplayName,
       });
 
-      await setDoc(doc(db, "users", credentials.user.uid), {
+      await firestoreApi.setDoc(firestoreApi.doc(db, "users", credentials.user.uid), {
         uid: credentials.user.uid,
         displayName: nextDisplayName,
         email: credentials.user.email ?? trimmedEmail,
         role: "participant",
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        createdAt: firestoreApi.serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
 
-      const profileSnapshot = await getDoc(doc(db, "users", credentials.user.uid));
+      const profileSnapshot = await firestoreApi.getDoc(firestoreApi.doc(db, "users", credentials.user.uid));
       if (!profileSnapshot.exists()) {
         setError("Účet byl vytvořen, ale uživatelský profil se nepodařilo uložit.");
-        await firebaseSignOut(auth);
+        await authApi.signOut(auth);
         isRegisteringRef.current = false;
         return false;
       }
@@ -217,7 +230,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ? String((profileError as { message?: unknown }).message ?? "")
         : "Neznámá chyba";
       setError(`${errorCode} – ${errorMessage}`);
-      await firebaseSignOut(auth);
+      const { auth, authApi } = await getFirebaseClient();
+      await authApi.signOut(auth);
       isRegisteringRef.current = false;
       return false;
     }
@@ -225,7 +239,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   async function signOut() {
     setError(null);
-    await firebaseSignOut(auth);
+    const { auth, authApi } = await getFirebaseClient();
+    await authApi.signOut(auth);
   }
 
   const value = useMemo<AuthContextValue>(

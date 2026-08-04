@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Timestamp, collection, doc, getDocs, onSnapshot, query, runTransaction, serverTimestamp, updateDoc, where } from "firebase/firestore";
+import type { Timestamp } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
-import { db } from "@/lib/firebase";
+import { getFirebaseClient } from "@/lib/firebase";
 import { normalizeDraftItem } from "@/lib/snakeDraft";
 import AuthGuard from "@/app/auth-guard";
 import { useAuth } from "@/components/AuthProvider";
@@ -227,62 +227,82 @@ function DraftDetailPageContent() {
       return;
     }
 
-    const draftRef = doc(db, "drafts", code);
-    const unsubscribe = onSnapshot(
-      draftRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          const resolvedTurnDurationSeconds = data.turnDurationSeconds === null
-            ? null
-            : Number(data.turnDurationSeconds ?? 15);
-          const draftData = {
-            id: snapshot.id,
-            title: data.title ?? "Bez názvu",
-            sport: data.sport ?? "NHL",
-            code: data.code ?? code,
-            status: data.status ?? "waiting",
-            productName: data.productName ?? "",
-            productSeason: data.productSeason ?? "",
-            productPrice: Number(data.productPrice ?? 0),
-            productImageUrl: data.productImageUrl ?? "",
-            boxCount: Number(data.boxCount ?? 0),
-            boxPrice: Number(data.boxPrice ?? 0),
-            margin: Number(data.margin ?? 0),
-            targetBreakPrice: Number(data.targetBreakPrice ?? 0),
-            participantCount: Number(data.participantCount ?? 0),
-            participants: ((data.participants ?? []) as DraftParticipant[]).map((participant, index) => normalizeParticipant(participant, index)),
-            currentPickIndex: Number(data.currentPickIndex ?? 0),
-            pickOrder: (data.pickOrder ?? []) as number[],
-            draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
-            availableItemIds: (data.availableItemIds ?? []) as string[],
-            history: (data.history ?? []) as DraftHistoryItem[],
-            turnDurationSeconds: resolvedTurnDurationSeconds,
-          };
+    let isMounted = true;
+    let unsubscribe: (() => void) | null = null;
 
-          setDraft(draftData);
-          setParticipantNames(draftData.participants.map((participant) => participant.name));
-          const nextOption = getTurnDurationOption(resolvedTurnDurationSeconds);
-          setTurnDurationOption(nextOption);
-          if (resolvedTurnDurationSeconds !== null && nextOption === "custom") {
-            setCustomTurnDurationSeconds(String(resolvedTurnDurationSeconds));
-          } else {
-            setCustomTurnDurationSeconds("15");
-          }
-        } else {
-          setDraft(null);
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
+
+        if (!isMounted) {
+          return;
         }
 
-        setIsLoading(false);
-      },
-      (loadError) => {
-        console.error(loadError);
+        const draftRef = firestoreApi.doc(db, "drafts", code);
+        unsubscribe = firestoreApi.onSnapshot(
+          draftRef,
+          (snapshot) => {
+            if (snapshot.exists()) {
+              const data = snapshot.data();
+              const resolvedTurnDurationSeconds = data.turnDurationSeconds === null
+                ? null
+                : Number(data.turnDurationSeconds ?? 15);
+              const draftData = {
+                id: snapshot.id,
+                title: data.title ?? "Bez názvu",
+                sport: data.sport ?? "NHL",
+                code: data.code ?? code,
+                status: data.status ?? "waiting",
+                productName: data.productName ?? "",
+                productSeason: data.productSeason ?? "",
+                productPrice: Number(data.productPrice ?? 0),
+                productImageUrl: data.productImageUrl ?? "",
+                boxCount: Number(data.boxCount ?? 0),
+                boxPrice: Number(data.boxPrice ?? 0),
+                margin: Number(data.margin ?? 0),
+                targetBreakPrice: Number(data.targetBreakPrice ?? 0),
+                participantCount: Number(data.participantCount ?? 0),
+                participants: ((data.participants ?? []) as DraftParticipant[]).map((participant, index) => normalizeParticipant(participant, index)),
+                currentPickIndex: Number(data.currentPickIndex ?? 0),
+                pickOrder: (data.pickOrder ?? []) as number[],
+                draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+                availableItemIds: (data.availableItemIds ?? []) as string[],
+                history: (data.history ?? []) as DraftHistoryItem[],
+                turnDurationSeconds: resolvedTurnDurationSeconds,
+              };
+
+              setDraft(draftData);
+              setParticipantNames(draftData.participants.map((participant) => participant.name));
+              const nextOption = getTurnDurationOption(resolvedTurnDurationSeconds);
+              setTurnDurationOption(nextOption);
+              if (resolvedTurnDurationSeconds !== null && nextOption === "custom") {
+                setCustomTurnDurationSeconds(String(resolvedTurnDurationSeconds));
+              } else {
+                setCustomTurnDurationSeconds("15");
+              }
+            } else {
+              setDraft(null);
+            }
+
+            setIsLoading(false);
+          },
+          (loadError) => {
+            console.error(loadError);
+            setError("Nepodařilo se načíst draft z Firestore.");
+            setIsLoading(false);
+          },
+        );
+      } catch (initError) {
+        console.error(initError);
         setError("Nepodařilo se načíst draft z Firestore.");
         setIsLoading(false);
-      },
-    );
+      }
+    })();
 
-    return () => unsubscribe();
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
   }, [code]);
 
   useEffect(() => {
@@ -300,13 +320,14 @@ function DraftDetailPageContent() {
     const searchTimeout = window.setTimeout(async () => {
       setIsSearchingUsers(true);
       try {
-        const usersRef = collection(db, "users");
-        const searchQuery = query(
+        const { db, firestoreApi } = await getFirebaseClient();
+        const usersRef = firestoreApi.collection(db, "users");
+        const searchQuery = firestoreApi.query(
           usersRef,
-          where("displayName", ">=", userSearch.trim()),
-          where("displayName", "<=", `${userSearch.trim()}\uf8ff`),
+          firestoreApi.where("displayName", ">=", userSearch.trim()),
+          firestoreApi.where("displayName", "<=", `${userSearch.trim()}\uf8ff`),
         );
-        const snapshot = await getDocs(searchQuery);
+        const snapshot = await firestoreApi.getDocs(searchQuery);
         const foundUsers = snapshot.docs
           .map((document) => document.data())
           .filter((candidate) => candidate.displayName || candidate.email)
@@ -479,9 +500,10 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
-      await updateDoc(doc(db, "drafts", draft.id), {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         ...updates,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
     } catch (updateError) {
       console.error(updateError);
@@ -511,9 +533,10 @@ function DraftDetailPageContent() {
 
     const nextTurnDurationSeconds = nextOption === "none" ? null : Number(nextOption);
     try {
-      await updateDoc(doc(db, "drafts", draft.id), {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         turnDurationSeconds: nextTurnDurationSeconds,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
     } catch (durationError) {
       console.error(durationError);
@@ -533,9 +556,10 @@ function DraftDetailPageContent() {
     }
 
     try {
-      await updateDoc(doc(db, "drafts", draft.id), {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         turnDurationSeconds: parsedCustomValue,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
     } catch (durationError) {
       console.error(durationError);
@@ -663,9 +687,10 @@ function DraftDetailPageContent() {
     );
 
     try {
-      await updateDoc(doc(db, "drafts", draft.id), {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         participants: nextParticipants,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
     } catch (generateError) {
       console.error(generateError);
@@ -712,7 +737,7 @@ function DraftDetailPageContent() {
           email: resolvedEmail,
           picks: resolvedPicks,
           status: "ready",
-          joinedAt: Timestamp.now(),
+          joinedAt: new Date(),
           pickCount: Number(participant.pickCount ?? resolvedPicks.length),
         },
         index,
@@ -728,13 +753,14 @@ function DraftDetailPageContent() {
       return;
     }
 
-    const draftDocRef = doc(db, "drafts", draftDocumentId);
+    const { db, firestoreApi } = await getFirebaseClient();
+    const draftDocRef = firestoreApi.doc(db, "drafts", draftDocumentId);
     console.log("ASSIGN DRAFT DOC", draftDocRef.path);
 
     try {
-      await updateDoc(draftDocRef, {
+      await firestoreApi.updateDoc(draftDocRef, {
         participants: nextParticipants,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
       setParticipantNames(nextParticipants.map((participant) => participant.name || participant.displayName || ""));
       setSelectedParticipantIndex(null);
@@ -786,9 +812,10 @@ function DraftDetailPageContent() {
     });
 
     try {
-      await updateDoc(doc(db, "drafts", draft.id), {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         participants: nextParticipants,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
       setParticipantNames(nextParticipants.map((participant) => participant.name || participant.displayName || ""));
       setSelectedParticipantIndex(null);
@@ -818,7 +845,8 @@ function DraftDetailPageContent() {
     setJoinMessage(null);
 
     try {
-      const draftRef = await getDocs(query(collection(db, "drafts"), where("code", "==", normalizedCode)));
+      const { db, firestoreApi } = await getFirebaseClient();
+      const draftRef = await firestoreApi.getDocs(firestoreApi.query(firestoreApi.collection(db, "drafts"), firestoreApi.where("code", "==", normalizedCode)));
       const draftDocument = draftRef.docs[0];
 
       if (!draftDocument) {
@@ -852,15 +880,15 @@ function DraftDetailPageContent() {
           displayName: participant.displayName ?? participant.name ?? nextDisplayName,
           name: participant.name || participant.displayName || nextDisplayName,
           email: user.email ?? participant.email ?? "",
-          joinedAt: serverTimestamp(),
+          joinedAt: firestoreApi.serverTimestamp(),
           pickCount: participant.pickCount ?? participant.picks?.length ?? 0,
           status: "ready" as const,
         };
       });
 
-      await updateDoc(doc(db, "drafts", draftDocument.id), {
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draftDocument.id), {
         participants: nextParticipants,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
 
       setJoinMessage("Připojili jste se k draftu.");
@@ -883,14 +911,15 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
+      const { db, firestoreApi } = await getFirebaseClient();
       const nextParticipants = draft.participants.map((participant, index) => ({
         ...participant,
         name: participantNames[index]?.trim() ?? "",
       }));
 
-      await updateDoc(doc(db, "drafts", draft.id), {
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         participants: nextParticipants,
-        updatedAt: serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
     } catch (saveError) {
       console.error(saveError);
@@ -954,12 +983,13 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
-      await updateDoc(doc(db, "drafts", draft.id), {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         participants: nextParticipants,
         status: "drafting",
         turnDurationSeconds: draft.turnDurationSeconds,
-        turnStartedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        turnStartedAt: firestoreApi.serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
       });
     } catch (startError) {
       console.error(startError);
@@ -994,8 +1024,9 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
-      await runTransaction(db, async (transaction) => {
-        const draftRef = doc(db, "drafts", draft.id);
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.runTransaction(db, async (transaction) => {
+        const draftRef = firestoreApi.doc(db, "drafts", draft.id);
         const latestSnapshot = await transaction.get(draftRef);
 
         if (!latestSnapshot.exists()) {
@@ -1037,11 +1068,11 @@ function DraftDetailPageContent() {
           status: nextStatus,
           currentPickIndex: nextPickIndex,
           history: nextHistory,
-          updatedAt: serverTimestamp(),
+          updatedAt: firestoreApi.serverTimestamp(),
         } as Record<string, unknown>;
 
         if (nextStatus === "drafting") {
-          nextDraftUpdate.turnStartedAt = serverTimestamp();
+          nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
         }
 
         transaction.update(draftRef, nextDraftUpdate);
@@ -1067,8 +1098,9 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
-      await runTransaction(db, async (transaction) => {
-        const draftRef = doc(db, "drafts", draft.id);
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.runTransaction(db, async (transaction) => {
+        const draftRef = firestoreApi.doc(db, "drafts", draft.id);
         const latestSnapshot = await transaction.get(draftRef);
 
         if (!latestSnapshot.exists()) {
@@ -1124,11 +1156,11 @@ function DraftDetailPageContent() {
           currentPickIndex: nextPickIndex,
           availableItemIds: nextAvailableItemIds,
           history: nextHistory,
-          updatedAt: serverTimestamp(),
+          updatedAt: firestoreApi.serverTimestamp(),
         } as Record<string, unknown>;
 
         if (nextStatus === "drafting") {
-          nextDraftUpdate.turnStartedAt = serverTimestamp();
+          nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
         }
 
         transaction.update(draftRef, nextDraftUpdate);
@@ -1284,13 +1316,18 @@ function DraftDetailPageContent() {
     nextParticipants.splice(nextIndex, 0, participant);
 
     setParticipantNames(nextParticipants.map((participant) => participant.name));
-    void updateDoc(doc(db, "drafts", draft.id), {
-      participants: nextParticipants,
-      updatedAt: serverTimestamp(),
-    }).catch((moveError) => {
-      console.error(moveError);
-      setError("Nepodařilo se změnit pořadí účastníků.");
-    });
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
+        await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+          participants: nextParticipants,
+          updatedAt: firestoreApi.serverTimestamp(),
+        });
+      } catch (moveError) {
+        console.error(moveError);
+        setError("Nepodařilo se změnit pořadí účastníků.");
+      }
+    })();
   }
 
   function shuffleParticipants() {
@@ -1305,13 +1342,18 @@ function DraftDetailPageContent() {
     }
 
     setParticipantNames(nextParticipants.map((participant) => participant.name));
-    void updateDoc(doc(db, "drafts", draft.id), {
-      participants: nextParticipants,
-      updatedAt: serverTimestamp(),
-    }).catch((shuffleError) => {
-      console.error(shuffleError);
-      setError("Nepodařilo se náhodně vylosovat pořadí účastníků.");
-    });
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
+        await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+          participants: nextParticipants,
+          updatedAt: firestoreApi.serverTimestamp(),
+        });
+      } catch (shuffleError) {
+        console.error(shuffleError);
+        setError("Nepodařilo se náhodně vylosovat pořadí účastníků.");
+      }
+    })();
   }
 
   if (isLoading) {

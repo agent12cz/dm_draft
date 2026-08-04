@@ -2,12 +2,11 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { collection, doc, getDocs, serverTimestamp, setDoc } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { PrimaryButton } from "@/components/PrimaryButton";
-import { db } from "@/lib/firebase";
+import { getFirebaseClient } from "@/lib/firebase";
 import { buildSnakeOrder, defaultDraftItems } from "@/lib/snakeDraft";
 import AuthGuard from "@/app/auth-guard";
 
@@ -63,7 +62,8 @@ function NewDraftPageContent() {
       setError(null);
 
       try {
-        const snapshot = await getDocs(collection(db, "products"));
+        const { db, firestoreApi } = await getFirebaseClient();
+        const snapshot = await firestoreApi.getDocs(firestoreApi.collection(db, "products"));
         const activeProducts = snapshot.docs
           .map((document) => ({
             id: document.id,
@@ -167,6 +167,7 @@ function NewDraftPageContent() {
         : Number(formValues.turnDurationOption);
 
     try {
+      const { db, firestoreApi } = await getFirebaseClient();
       const draftCode = generateDraftCode();
       const selectedProduct = products.find((product) => product.id === formValues.selectedProductId);
       const targetBreakPrice = boxCount * boxPrice + margin;
@@ -210,12 +211,12 @@ function NewDraftPageContent() {
         availableItemIds: defaultDraftItems.map((item) => item.id),
         history: [],
         turnDurationSeconds,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        createdAt: firestoreApi.serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
         code: draftCode,
       };
 
-      await setDoc(doc(db, "drafts", draftCode), draftData);
+      await firestoreApi.setDoc(firestoreApi.doc(db, "drafts", draftCode), draftData);
       router.push(`/draft/${draftCode}`);
     } catch (createError) {
       console.error(createError);

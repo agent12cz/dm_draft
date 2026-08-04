@@ -1,6 +1,6 @@
-import { initializeApp, getApps, getApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import type { FirebaseApp } from "firebase/app";
+import type { Auth } from "firebase/auth";
+import type { Firestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -11,8 +11,40 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+export type FirebaseClient = {
+  app: FirebaseApp;
+  auth: Auth;
+  db: Firestore;
+  authApi: typeof import("firebase/auth");
+  firestoreApi: typeof import("firebase/firestore");
+};
 
-export const auth = getAuth(app);
-export const db = getFirestore(app);
-export default app;
+let firebaseClientPromise: Promise<FirebaseClient> | null = null;
+
+export function getFirebaseClient() {
+  if (typeof window === "undefined") {
+    throw new Error("Firebase client lze inicializovat pouze v prohlížeči.");
+  }
+
+  if (!firebaseClientPromise) {
+    firebaseClientPromise = Promise.all([
+      import("firebase/app"),
+      import("firebase/auth"),
+      import("firebase/firestore"),
+    ]).then(([appApi, authApi, firestoreApi]) => {
+      const app = appApi.getApps().length
+        ? appApi.getApp()
+        : appApi.initializeApp(firebaseConfig);
+
+      return {
+        app,
+        auth: authApi.getAuth(app),
+        db: firestoreApi.getFirestore(app),
+        authApi,
+        firestoreApi,
+      };
+    });
+  }
+
+  return firebaseClientPromise;
+}

@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { addDoc, collection, doc, getDocs, onSnapshot, orderBy, query, serverTimestamp, where, type Timestamp } from "firebase/firestore";
 import type { User } from "firebase/auth";
-import { db } from "@/lib/firebase";
+import type { Timestamp } from "firebase/firestore";
+import { getFirebaseClient } from "@/lib/firebase";
 
 type DraftChatProps = {
   draftId?: string | null;
@@ -71,8 +71,12 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole }: 
       setChatError(null);
 
       try {
-        const draftQuery = query(collection(db, "drafts"), where("code", "==", draftCode));
-        const snapshot = await getDocs(draftQuery);
+        const { db, firestoreApi } = await getFirebaseClient();
+        const draftQuery = firestoreApi.query(
+          firestoreApi.collection(db, "drafts"),
+          firestoreApi.where("code", "==", draftCode),
+        );
+        const snapshot = await firestoreApi.getDocs(draftQuery);
         const firstMatch = snapshot.docs[0];
 
         if (isMounted) {
@@ -101,31 +105,49 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole }: 
       return;
     }
 
-    const draftRef = doc(db, "drafts", resolvedDraftId);
-    const unsubscribe = onSnapshot(
-      draftRef,
-      (snapshot) => {
-        if (!snapshot.exists()) {
-          setIsParticipantAssigned(false);
+    let unsubscribe: (() => void) | null = null;
+    let isMounted = true;
+
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
+        if (!isMounted) {
           return;
         }
 
-        const data = snapshot.data() as { participants?: Array<{ userId?: string; uid?: string }> };
-        const participants = data.participants ?? [];
-        const isAssigned = participants.some((participant) => {
-          const participantUid = participant.userId ?? participant.uid;
-          return Boolean(participantUid && currentUser.uid && participantUid === currentUser.uid);
-        });
+        const draftRef = firestoreApi.doc(db, "drafts", resolvedDraftId);
+        unsubscribe = firestoreApi.onSnapshot(
+          draftRef,
+          (snapshot) => {
+            if (!snapshot.exists()) {
+              setIsParticipantAssigned(false);
+              return;
+            }
 
-        setIsParticipantAssigned(isAssigned);
-      },
-      (draftError) => {
+            const data = snapshot.data() as { participants?: Array<{ userId?: string; uid?: string }> };
+            const participants = data.participants ?? [];
+            const isAssigned = participants.some((participant) => {
+              const participantUid = participant.userId ?? participant.uid;
+              return Boolean(participantUid && currentUser.uid && participantUid === currentUser.uid);
+            });
+
+            setIsParticipantAssigned(isAssigned);
+          },
+          (draftError) => {
+            console.error(draftError);
+            setChatError("Nepodařilo se načíst přístup k draftu.");
+          },
+        );
+      } catch (draftError) {
         console.error(draftError);
         setChatError("Nepodařilo se načíst přístup k draftu.");
-      },
-    );
+      }
+    })();
 
-    return () => unsubscribe();
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
   }, [currentUser, resolvedDraftId]);
 
   useEffect(() => {
@@ -133,46 +155,65 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole }: 
       return;
     }
 
-    const messagesRef = collection(db, "drafts", resolvedDraftId, "messages");
-    const messagesQuery = query(messagesRef, orderBy("createdAt", "asc"));
+    let unsubscribe: (() => void) | null = null;
+    let isMounted = true;
 
-    const unsubscribe = onSnapshot(
-      messagesQuery,
-      (snapshot) => {
-        const nextMessages = snapshot.docs
-          .map((document) => {
-            const data = document.data() as Partial<DraftMessage>;
-            return {
-              id: document.id,
-              userId: data.userId ?? "",
-              displayName: data.displayName ?? "Uživatel",
-              role: data.role === "admin" ? "admin" : "participant",
-              text: data.text ?? "",
-              createdAt: data.createdAt,
-            } satisfies DraftMessage;
-          })
-          .sort((left, right) => {
-            const leftTime = left.createdAt && typeof left.createdAt === "object" && "toDate" in left.createdAt && typeof left.createdAt.toDate === "function"
-              ? left.createdAt.toDate().getTime()
-              : 0;
-            const rightTime = right.createdAt && typeof right.createdAt === "object" && "toDate" in right.createdAt && typeof right.createdAt.toDate === "function"
-              ? right.createdAt.toDate().getTime()
-              : 0;
-            return leftTime - rightTime;
-          });
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
+        if (!isMounted) {
+          return;
+        }
 
-        setMessages(nextMessages);
-        setIsLoadingMessages(false);
-        setChatError(null);
-      },
-      (messagesError) => {
+        const messagesRef = firestoreApi.collection(db, "drafts", resolvedDraftId, "messages");
+        const messagesQuery = firestoreApi.query(messagesRef, firestoreApi.orderBy("createdAt", "asc"));
+
+        unsubscribe = firestoreApi.onSnapshot(
+          messagesQuery,
+          (snapshot) => {
+            const nextMessages = snapshot.docs
+              .map((document) => {
+                const data = document.data() as Partial<DraftMessage>;
+                return {
+                  id: document.id,
+                  userId: data.userId ?? "",
+                  displayName: data.displayName ?? "Uživatel",
+                  role: data.role === "admin" ? "admin" : "participant",
+                  text: data.text ?? "",
+                  createdAt: data.createdAt,
+                } satisfies DraftMessage;
+              })
+              .sort((left, right) => {
+                const leftTime = left.createdAt && typeof left.createdAt === "object" && "toDate" in left.createdAt && typeof left.createdAt.toDate === "function"
+                  ? left.createdAt.toDate().getTime()
+                  : 0;
+                const rightTime = right.createdAt && typeof right.createdAt === "object" && "toDate" in right.createdAt && typeof right.createdAt.toDate === "function"
+                  ? right.createdAt.toDate().getTime()
+                  : 0;
+                return leftTime - rightTime;
+              });
+
+            setMessages(nextMessages);
+            setIsLoadingMessages(false);
+            setChatError(null);
+          },
+          (messagesError) => {
+            console.error(messagesError);
+            setIsLoadingMessages(false);
+            setChatError("Nepodařilo se načíst zprávy chatu.");
+          },
+        );
+      } catch (messagesError) {
         console.error(messagesError);
         setIsLoadingMessages(false);
         setChatError("Nepodařilo se načíst zprávy chatu.");
-      },
-    );
+      }
+    })();
 
-    return () => unsubscribe();
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
   }, [resolvedDraftId]);
 
   useEffect(() => {
@@ -205,12 +246,13 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole }: 
     setChatError(null);
 
     try {
-      await addDoc(collection(db, "drafts", resolvedDraftId, "messages"), {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.addDoc(firestoreApi.collection(db, "drafts", resolvedDraftId, "messages"), {
         userId: currentUser.uid,
         displayName: currentUser.displayName?.trim() || currentUser.email?.split("@", 1)[0] || "Uživatel",
         role: currentUserRole === "admin" ? "admin" : "participant",
         text: trimmedText,
-        createdAt: serverTimestamp(),
+        createdAt: firestoreApi.serverTimestamp(),
       });
 
       setInputText("");

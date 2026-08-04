@@ -3,12 +3,11 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { collection, deleteDoc, doc, getDoc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { Card } from "@/components/Card";
-import { db } from "@/lib/firebase";
+import { getFirebaseClient } from "@/lib/firebase";
 import { buildSnakeOrder, defaultDraftItems } from "@/lib/snakeDraft";
 import AuthGuard from "@/app/auth-guard";
 
@@ -119,37 +118,53 @@ function HomeContent() {
 
   useEffect(() => {
     let isMounted = true;
+    let unsubscribe: (() => void) | null = null;
 
-    const unsubscribe = onSnapshot(
-      collection(db, "drafts"),
-      (snapshot) => {
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
         if (!isMounted) {
           return;
         }
 
-        const nextDrafts = snapshot.docs
-          .map((document) => ({
-            id: document.id,
-            ...(document.data() as Omit<DraftDocument, "id">),
-          }))
-          .sort((left, right) => getSortValue(right.updatedAt ?? right.createdAt) - getSortValue(left.updatedAt ?? left.createdAt));
+        unsubscribe = firestoreApi.onSnapshot(
+          firestoreApi.collection(db, "drafts"),
+          (snapshot) => {
+            if (!isMounted) {
+              return;
+            }
 
-        setDrafts(nextDrafts);
-        setError(null);
-        setIsLoading(false);
-      },
-      (loadError) => {
-        console.error(loadError);
+            const nextDrafts = snapshot.docs
+              .map((document) => ({
+                id: document.id,
+                ...(document.data() as Omit<DraftDocument, "id">),
+              }))
+              .sort((left, right) => getSortValue(right.updatedAt ?? right.createdAt) - getSortValue(left.updatedAt ?? left.createdAt));
+
+            setDrafts(nextDrafts);
+            setError(null);
+            setIsLoading(false);
+          },
+          (loadError) => {
+            console.error(loadError);
+            if (isMounted) {
+              setError("Nepodařilo se načíst drafty z Firestore.");
+              setIsLoading(false);
+            }
+          },
+        );
+      } catch (initError) {
+        console.error(initError);
         if (isMounted) {
           setError("Nepodařilo se načíst drafty z Firestore.");
           setIsLoading(false);
         }
-      },
-    );
+      }
+    })();
 
     return () => {
       isMounted = false;
-      unsubscribe();
+      unsubscribe?.();
     };
   }, []);
 
@@ -168,11 +183,12 @@ function HomeContent() {
     setError(null);
 
     try {
+      const { db, firestoreApi } = await getFirebaseClient();
       let draftCode = generateDraftCode();
       let isCodeTaken = true;
 
       while (isCodeTaken) {
-        const existingDraft = await getDoc(doc(db, "drafts", draftCode));
+        const existingDraft = await firestoreApi.getDoc(firestoreApi.doc(db, "drafts", draftCode));
         if (!existingDraft.exists()) {
           isCodeTaken = false;
           break;
@@ -214,12 +230,12 @@ function HomeContent() {
         availableItemIds: nextAvailableItemIds,
         history: [],
         turnDurationSeconds: draft.turnDurationSeconds === null ? null : Number(draft.turnDurationSeconds ?? 15),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        createdAt: firestoreApi.serverTimestamp(),
+        updatedAt: firestoreApi.serverTimestamp(),
         code: draftCode,
       };
 
-      await setDoc(doc(db, "drafts", draftCode), duplicateDraftData);
+      await firestoreApi.setDoc(firestoreApi.doc(db, "drafts", draftCode), duplicateDraftData);
       router.push(`/draft/${draftCode}`);
     } catch (duplicateError) {
       console.error(duplicateError);
@@ -238,7 +254,8 @@ function HomeContent() {
     setError(null);
 
     try {
-      await deleteDoc(doc(db, "drafts", draftToDelete.id));
+      const { db, firestoreApi } = await getFirebaseClient();
+      await firestoreApi.deleteDoc(firestoreApi.doc(db, "drafts", draftToDelete.id));
       setDraftToDelete(null);
     } catch (deleteError) {
       console.error(deleteError);

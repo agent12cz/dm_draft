@@ -2,8 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import { doc, onSnapshot } from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { getFirebaseClient } from "@/lib/firebase";
 import { normalizeDraftItem } from "@/lib/snakeDraft";
 
 type DraftParticipant = {
@@ -79,49 +78,69 @@ export default function ViewerPage() {
       return;
     }
 
-    const draftRef = doc(db, "drafts", code);
-    const unsubscribe = onSnapshot(
-      draftRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          const draftData = {
-            id: snapshot.id,
-            title: data.title ?? "Bez názvu",
-            sport: data.sport ?? "NHL",
-            code: data.code ?? code,
-            status: data.status ?? "waiting",
-            productName: data.productName ?? "",
-            productSeason: data.productSeason ?? "",
-            productImageUrl: data.productImageUrl ?? "",
-            boxCount: Number(data.boxCount ?? 0),
-            boxPrice: Number(data.boxPrice ?? 0),
-            margin: Number(data.margin ?? 0),
-            targetBreakPrice: Number(data.targetBreakPrice ?? 0),
-            participantCount: Number(data.participantCount ?? 0),
-            participants: (data.participants ?? []) as DraftParticipant[],
-            currentPickIndex: Number(data.currentPickIndex ?? 0),
-            pickOrder: (data.pickOrder ?? []) as number[],
-            draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
-            availableItemIds: (data.availableItemIds ?? []) as string[],
-            history: (data.history ?? []) as DraftHistoryItem[],
-          };
+    let isMounted = true;
+    let unsubscribe: (() => void) | null = null;
 
-          setDraft(draftData);
-        } else {
-          setDraft(null);
+    void (async () => {
+      try {
+        const { db, firestoreApi } = await getFirebaseClient();
+
+        if (!isMounted) {
+          return;
         }
 
-        setIsLoading(false);
-      },
-      (loadError) => {
-        console.error(loadError);
+        const draftRef = firestoreApi.doc(db, "drafts", code);
+        unsubscribe = firestoreApi.onSnapshot(
+          draftRef,
+          (snapshot) => {
+            if (snapshot.exists()) {
+              const data = snapshot.data();
+              const draftData = {
+                id: snapshot.id,
+                title: data.title ?? "Bez názvu",
+                sport: data.sport ?? "NHL",
+                code: data.code ?? code,
+                status: data.status ?? "waiting",
+                productName: data.productName ?? "",
+                productSeason: data.productSeason ?? "",
+                productImageUrl: data.productImageUrl ?? "",
+                boxCount: Number(data.boxCount ?? 0),
+                boxPrice: Number(data.boxPrice ?? 0),
+                margin: Number(data.margin ?? 0),
+                targetBreakPrice: Number(data.targetBreakPrice ?? 0),
+                participantCount: Number(data.participantCount ?? 0),
+                participants: (data.participants ?? []) as DraftParticipant[],
+                currentPickIndex: Number(data.currentPickIndex ?? 0),
+                pickOrder: (data.pickOrder ?? []) as number[],
+                draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+                availableItemIds: (data.availableItemIds ?? []) as string[],
+                history: (data.history ?? []) as DraftHistoryItem[],
+              };
+
+              setDraft(draftData);
+            } else {
+              setDraft(null);
+            }
+
+            setIsLoading(false);
+          },
+          (loadError) => {
+            console.error(loadError);
+            setError("Nepodařilo se načíst draft z Firestore.");
+            setIsLoading(false);
+          },
+        );
+      } catch (initError) {
+        console.error(initError);
         setError("Nepodařilo se načíst draft z Firestore.");
         setIsLoading(false);
-      },
-    );
+      }
+    })();
 
-    return () => unsubscribe();
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
   }, [code]);
 
   const currentParticipantIndex = draft?.pickOrder[draft.currentPickIndex] ?? null;
