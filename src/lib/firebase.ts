@@ -39,7 +39,12 @@ export function getFirebaseClient() {
       return {
         app,
         auth: authApi.getAuth(app),
-        db: firestoreApi.getFirestore(app),
+        db: firestoreApi.initializeFirestore(app, {
+          experimentalForceLongPolling: true,
+          experimentalLongPollingOptions: {
+            timeoutSeconds: 15,
+          },
+        }),
         authApi,
         firestoreApi,
       };
