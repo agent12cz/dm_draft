@@ -1,6 +1,18 @@
+"use client";
+
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/components/AuthProvider";
 
 export function Navbar() {
+  const router = useRouter();
+  const { user, signOut } = useAuth();
+
+  async function handleLogout() {
+    await signOut();
+    router.replace("/login");
+  }
+
   return (
     <header className="sticky top-0 z-20 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4 lg:px-8">
@@ -23,9 +35,33 @@ export function Navbar() {
           <Link href="/draft/new" className="transition hover:text-white">
             Nový draft
           </Link>
-          <Link href="/draft/join" className="transition hover:text-white">
+          <Link href="/join" className="transition hover:text-white">
             Připojit se
           </Link>
+          <Link href="/register" className="transition hover:text-white">
+            Registrace
+          </Link>
+          <Link href="/products" className="transition hover:text-white">
+            Boxy
+          </Link>
+          {user ? (
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-slate-200 transition hover:bg-slate-800"
+            >
+              Odhlásit se
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Link href="/register" className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-slate-200 transition hover:bg-slate-800">
+                Registrovat
+              </Link>
+              <Link href="/login" className="rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1.5 font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20">
+                Přihlásit se
+              </Link>
+            </div>
+          )}
         </nav>
       </div>
     </header>
