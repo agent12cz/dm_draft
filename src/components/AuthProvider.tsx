@@ -77,12 +77,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const isRegisteringRef = useRef(false);
+  const hasHandledProfileErrorRef = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
-    let unsubscribeAuthListener: (() => void) | null = null;
+    let unsubscribeAuthListener: (() => void) | undefined;
 
-    void (async () => {
+    async function initializeAuth() {
       try {
         const { auth, db, authApi, firestoreApi } = await getFirebaseClient();
 
@@ -95,6 +96,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return;
           }
 
+          hasHandledProfileErrorRef.current = false;
           setLoading(true);
           setUser(nextUser);
           setError(null);
@@ -109,6 +111,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             const profileRef = firestoreApi.doc(db, "users", nextUser.uid);
             const profileSnapshot = await firestoreApi.getDoc(profileRef);
 
+            if (!isMounted) {
+              return;
+            }
+
             if (!profileSnapshot.exists()) {
               if (isRegisteringRef.current) {
                 setLoading(false);
@@ -117,7 +123,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
               setProfile(null);
               setError(PROFILE_MISSING_MESSAGE);
-              await authApi.signOut(auth);
+              setLoading(false);
+              if (!hasHandledProfileErrorRef.current) {
+                hasHandledProfileErrorRef.current = true;
+                await authApi.signOut(auth);
+              }
               redirectToLoginWithMessage(PROFILE_MISSING_MESSAGE);
               return;
             }
@@ -134,25 +144,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               createdAt: profileData.createdAt,
               updatedAt: profileData.updatedAt,
             });
+            setLoading(false);
           } catch (profileError) {
-            console.error(profileError);
+            console.error("PROFILE LOAD ERROR", profileError);
+
+            if (!isMounted) {
+              return;
+            }
+
             setProfile(null);
             setError("Nepodařilo se načíst uživatelský profil.");
-            await authApi.signOut(auth);
-            redirectToLoginWithMessage("Nepodařilo se načíst uživatelský profil.");
-            return;
-          }
+            setLoading(false);
 
-          setLoading(false);
+            if (!hasHandledProfileErrorRef.current) {
+              hasHandledProfileErrorRef.current = true;
+              await authApi.signOut(auth);
+            }
+
+            redirectToLoginWithMessage("Nepodařilo se načíst uživatelský profil.");
+          }
         });
-      } catch (initError) {
-        console.error(initError);
+      } catch (initializationError) {
+        console.error("FIREBASE AUTH INIT ERROR", initializationError);
+
         if (isMounted) {
-          setError("Nepodařilo se inicializovat autentizaci.");
+          setUser(null);
+          setProfile(null);
+          setError("Nepodařilo se inicializovat přihlášení.");
           setLoading(false);
         }
       }
-    })();
+    }
+
+    void initializeAuth();
 
     return () => {
       isMounted = false;
@@ -223,13 +247,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return true;
     } catch (profileError) {
       console.error("CREATE USER PROFILE ERROR", profileError);
-      const errorCode = typeof profileError === "object" && profileError && "code" in profileError
-        ? String((profileError as { code?: unknown }).code ?? "unknown")
-        : "unknown";
-      const errorMessage = typeof profileError === "object" && profileError && "message" in profileError
-        ? String((profileError as { message?: unknown }).message ?? "")
-        : "Neznámá chyba";
-      setError(`${errorCode} – ${errorMessage}`);
+      setError("Účet byl vytvořen, ale uživatelský profil se nepodařilo uložit.");
       const { auth, authApi } = await getFirebaseClient();
       await authApi.signOut(auth);
       isRegisteringRef.current = false;
