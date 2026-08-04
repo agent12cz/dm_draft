@@ -77,92 +77,129 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const isRegisteringRef = useRef(false);
-  const hasHandledProfileErrorRef = useRef(false);
+  const profileLoadSequenceRef = useRef(0);
+  const redirectIssuedRef = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
     let unsubscribeAuthListener: (() => void) | undefined;
 
+    async function loadProfile(
+      nextUser: User,
+      requestId: number,
+      client: Awaited<ReturnType<typeof getFirebaseClient>>,
+    ) {
+      const { db, firestoreApi } = client;
+      let timeoutId: number | undefined;
+
+      try {
+        const profileRef = firestoreApi.doc(db, "users", nextUser.uid);
+        const profileSnapshotPromise = firestoreApi.getDoc(profileRef);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            reject(new Error("PROFILE_LOAD_TIMEOUT"));
+          }, 10000);
+        });
+
+        const profileSnapshot = await Promise.race([profileSnapshotPromise, timeoutPromise]);
+
+        if (!isMounted || profileLoadSequenceRef.current !== requestId) {
+          return;
+        }
+
+        if (!profileSnapshot.exists()) {
+          if (isRegisteringRef.current) {
+            return;
+          }
+
+          setProfile(null);
+          setError(PROFILE_MISSING_MESSAGE);
+
+          if (!redirectIssuedRef.current) {
+            redirectIssuedRef.current = true;
+            redirectToLoginWithMessage(PROFILE_MISSING_MESSAGE);
+          }
+
+          return;
+        }
+
+        const profileData = profileSnapshot.data() as Partial<UserProfile>;
+        const resolvedDisplayName = profileData.displayName?.trim() || nextUser.displayName || nextUser.email || "Uživatel";
+        const resolvedEmail = profileData.email?.trim() || nextUser.email || "";
+
+        setProfile({
+          uid: nextUser.uid,
+          displayName: resolvedDisplayName,
+          email: resolvedEmail,
+          role: getSafeRole(profileData.role),
+          createdAt: profileData.createdAt,
+          updatedAt: profileData.updatedAt,
+        });
+      } catch (profileError) {
+        if (!isMounted || profileLoadSequenceRef.current !== requestId) {
+          return;
+        }
+
+        const isTimeout = profileError instanceof Error && profileError.message === "PROFILE_LOAD_TIMEOUT";
+
+        if (isRegisteringRef.current) {
+          return;
+        }
+
+        if (isTimeout) {
+          setError("Načtení profilu trvá příliš dlouho. Zkuste to prosím znovu.");
+        } else {
+          console.error("PROFILE LOAD ERROR", profileError);
+          setError("Nepodařilo se načíst uživatelský profil.");
+        }
+
+        setProfile(null);
+
+        if (!redirectIssuedRef.current) {
+          redirectIssuedRef.current = true;
+          redirectToLoginWithMessage(isTimeout ? "Načtení profilu trvá příliš dlouho. Zkuste to prosím znovu." : "Nepodařilo se načíst uživatelský profil.");
+        }
+      } finally {
+        if (timeoutId !== undefined) {
+          window.clearTimeout(timeoutId);
+        }
+
+        if (isMounted && profileLoadSequenceRef.current === requestId) {
+          setLoading(false);
+        }
+      }
+    }
+
     async function initializeAuth() {
       try {
-        const { auth, db, authApi, firestoreApi } = await getFirebaseClient();
+        const client = await getFirebaseClient();
+        const { auth, authApi } = client;
 
         if (!isMounted) {
           return;
         }
 
-        unsubscribeAuthListener = authApi.onAuthStateChanged(auth, async (nextUser) => {
+        unsubscribeAuthListener = authApi.onAuthStateChanged(auth, (nextUser) => {
           if (!isMounted) {
             return;
           }
 
-          hasHandledProfileErrorRef.current = false;
-          setLoading(true);
           setUser(nextUser);
-          setError(null);
+          profileLoadSequenceRef.current += 1;
+          const requestId = profileLoadSequenceRef.current;
 
           if (!nextUser) {
             setProfile(null);
+            setError(null);
             setLoading(false);
             return;
           }
 
-          try {
-            const profileRef = firestoreApi.doc(db, "users", nextUser.uid);
-            const profileSnapshot = await firestoreApi.getDoc(profileRef);
+          redirectIssuedRef.current = false;
+          setError(null);
+          setLoading(true);
 
-            if (!isMounted) {
-              return;
-            }
-
-            if (!profileSnapshot.exists()) {
-              if (isRegisteringRef.current) {
-                setLoading(false);
-                return;
-              }
-
-              setProfile(null);
-              setError(PROFILE_MISSING_MESSAGE);
-              setLoading(false);
-              if (!hasHandledProfileErrorRef.current) {
-                hasHandledProfileErrorRef.current = true;
-                await authApi.signOut(auth);
-              }
-              redirectToLoginWithMessage(PROFILE_MISSING_MESSAGE);
-              return;
-            }
-
-            const profileData = profileSnapshot.data() as Partial<UserProfile>;
-            const resolvedDisplayName = profileData.displayName?.trim() || nextUser.displayName || nextUser.email || "Uživatel";
-            const resolvedEmail = profileData.email?.trim() || nextUser.email || "";
-
-            setProfile({
-              uid: nextUser.uid,
-              displayName: resolvedDisplayName,
-              email: resolvedEmail,
-              role: getSafeRole(profileData.role),
-              createdAt: profileData.createdAt,
-              updatedAt: profileData.updatedAt,
-            });
-            setLoading(false);
-          } catch (profileError) {
-            console.error("PROFILE LOAD ERROR", profileError);
-
-            if (!isMounted) {
-              return;
-            }
-
-            setProfile(null);
-            setError("Nepodařilo se načíst uživatelský profil.");
-            setLoading(false);
-
-            if (!hasHandledProfileErrorRef.current) {
-              hasHandledProfileErrorRef.current = true;
-              await authApi.signOut(auth);
-            }
-
-            redirectToLoginWithMessage("Nepodařilo se načíst uživatelský profil.");
-          }
+          void loadProfile(nextUser, requestId, client);
         });
       } catch (initializationError) {
         console.error("FIREBASE AUTH INIT ERROR", initializationError);

@@ -7,13 +7,19 @@ import { useAuth } from "@/components/AuthProvider";
 
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const { user, loading, isAdmin, signOut } = useAuth();
+  const { user, profile, loading, isAdmin, signOut } = useAuth();
 
   useEffect(() => {
     if (!loading && !user) {
       router.replace("/login");
     }
   }, [loading, router, user]);
+
+  useEffect(() => {
+    if (!loading && user && !profile) {
+      router.replace("/login");
+    }
+  }, [loading, profile, router, user]);
 
   useEffect(() => {
     if (!loading && user && !isAdmin) {
@@ -70,6 +76,10 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (!user) {
+    return null;
+  }
+
+  if (!profile) {
     return null;
   }
 

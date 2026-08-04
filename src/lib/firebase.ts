@@ -20,6 +20,7 @@ export type FirebaseClient = {
 };
 
 let firebaseClientPromise: Promise<FirebaseClient> | null = null;
+let firestoreInstance: Firestore | null = null;
 
 export function getFirebaseClient() {
   if (typeof window === "undefined") {
@@ -36,15 +37,23 @@ export function getFirebaseClient() {
         ? appApi.getApp()
         : appApi.initializeApp(firebaseConfig);
 
+      if (!firestoreInstance) {
+        try {
+          firestoreInstance = firestoreApi.initializeFirestore(app, {
+            experimentalForceLongPolling: true,
+            experimentalLongPollingOptions: {
+              timeoutSeconds: 15,
+            },
+          });
+        } catch (firestoreInitializationError) {
+          firestoreInstance = firestoreApi.getFirestore(app);
+        }
+      }
+
       return {
         app,
         auth: authApi.getAuth(app),
-        db: firestoreApi.initializeFirestore(app, {
-          experimentalForceLongPolling: true,
-          experimentalLongPollingOptions: {
-            timeoutSeconds: 15,
-          },
-        }),
+        db: firestoreInstance,
         authApi,
         firestoreApi,
       };

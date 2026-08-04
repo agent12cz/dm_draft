@@ -23,6 +23,10 @@ export default function RegisterPage() {
       return;
     }
 
+    if (!profile) {
+      return;
+    }
+
     if (profile?.role === "admin") {
       router.replace("/");
       return;

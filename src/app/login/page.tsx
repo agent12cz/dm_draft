@@ -32,6 +32,10 @@ export default function LoginPage() {
       return;
     }
 
+    if (!profile) {
+      return;
+    }
+
     if (profile?.role === "admin") {
       router.replace("/");
       return;
