@@ -78,6 +78,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const isRegisteringRef = useRef(false);
   const profileLoadSequenceRef = useRef(0);
+  const activeProfileRequestIdRef = useRef<number | null>(null);
   const redirectIssuedRef = useRef(false);
 
   useEffect(() => {
@@ -103,7 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         const profileSnapshot = await Promise.race([profileSnapshotPromise, timeoutPromise]);
 
-        if (!isMounted || profileLoadSequenceRef.current !== requestId) {
+        if (!isMounted || activeProfileRequestIdRef.current !== requestId) {
           return;
         }
 
@@ -111,7 +112,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (isRegisteringRef.current) {
             return;
           }
-
           setProfile(null);
           setError(PROFILE_MISSING_MESSAGE);
 
@@ -126,7 +126,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const profileData = profileSnapshot.data() as Partial<UserProfile>;
         const resolvedDisplayName = profileData.displayName?.trim() || nextUser.displayName || nextUser.email || "Uživatel";
         const resolvedEmail = profileData.email?.trim() || nextUser.email || "";
-
         setProfile({
           uid: nextUser.uid,
           displayName: resolvedDisplayName,
@@ -136,7 +135,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           updatedAt: profileData.updatedAt,
         });
       } catch (profileError) {
-        if (!isMounted || profileLoadSequenceRef.current !== requestId) {
+        if (!isMounted || activeProfileRequestIdRef.current !== requestId) {
           return;
         }
 
@@ -147,7 +146,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (isTimeout) {
-          setError("Načtení profilu trvá příliš dlouho. Zkuste to prosím znovu.");
+          setError("Načtení profilu trvalo příliš dlouho.");
         } else {
           console.error("PROFILE LOAD ERROR", profileError);
           setError("Nepodařilo se načíst uživatelský profil.");
@@ -157,16 +156,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         if (!redirectIssuedRef.current) {
           redirectIssuedRef.current = true;
-          redirectToLoginWithMessage(isTimeout ? "Načtení profilu trvá příliš dlouho. Zkuste to prosím znovu." : "Nepodařilo se načíst uživatelský profil.");
+          redirectToLoginWithMessage(isTimeout ? "Načtení profilu trvalo příliš dlouho." : "Nepodařilo se načíst uživatelský profil.");
         }
       } finally {
         if (timeoutId !== undefined) {
           window.clearTimeout(timeoutId);
         }
 
-        if (isMounted && profileLoadSequenceRef.current === requestId) {
-          setLoading(false);
+        if (!isMounted) {
+          return;
         }
+
+        const activeRequestId = activeProfileRequestIdRef.current;
+        const latestRequestId = profileLoadSequenceRef.current;
+
+        if (activeRequestId === requestId) {
+          activeProfileRequestIdRef.current = null;
+          setLoading(false);
+          return;
+        }
+
+        if (latestRequestId > requestId && activeRequestId !== null) {
+          return;
+        }
+        setLoading(false);
       }
     }
 
@@ -189,6 +202,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const requestId = profileLoadSequenceRef.current;
 
           if (!nextUser) {
+            activeProfileRequestIdRef.current = null;
             setProfile(null);
             setError(null);
             setLoading(false);
@@ -196,6 +210,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           }
 
           redirectIssuedRef.current = false;
+          activeProfileRequestIdRef.current = requestId;
           setError(null);
           setLoading(true);
 

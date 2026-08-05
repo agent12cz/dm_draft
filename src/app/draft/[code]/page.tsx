@@ -744,9 +744,6 @@ function DraftDetailPageContent() {
       );
     });
 
-    console.log("ASSIGN PARTICIPANTS PAYLOAD", nextParticipants);
-    console.log("ASSIGN PARTICIPANTS HAS UNDEFINED", nextParticipants.some((participant) => Object.values(participant).some((value) => value === undefined)));
-
     const draftDocumentId = draft.id || code || "";
     if (!draftDocumentId) {
       setError("Přiřazení selhalo: chybí identifikátor draftu.");
@@ -755,7 +752,6 @@ function DraftDetailPageContent() {
 
     const { db, firestoreApi } = await getFirebaseClient();
     const draftDocRef = firestoreApi.doc(db, "drafts", draftDocumentId);
-    console.log("ASSIGN DRAFT DOC", draftDocRef.path);
 
     try {
       await firestoreApi.updateDoc(draftDocRef, {

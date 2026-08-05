@@ -16,16 +16,10 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }, [loading, router, user]);
 
   useEffect(() => {
-    if (!loading && user && !profile) {
-      router.replace("/login");
-    }
-  }, [loading, profile, router, user]);
-
-  useEffect(() => {
     if (!loading && user && !isAdmin) {
       router.replace("/join");
     }
-  }, [isAdmin, loading, router, user]);
+  }, [isAdmin, loading, profile, router, user]);
 
   async function handleLogout() {
     await signOut();
