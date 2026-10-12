@@ -167,7 +167,7 @@ export default function ViewerPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
+      <div className="min-h-screen px-6 py-8 text-slate-100">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 rounded-[32px] border border-slate-800 bg-slate-900/90 p-8 shadow-2xl shadow-slate-950/60">
           <p className="text-sm font-semibold uppercase tracking-[0.3em] text-[#18C964]">Viewer</p>
           <h1 className="text-4xl font-semibold tracking-tight text-white">Načítám draft...</h1>
@@ -179,7 +179,7 @@ export default function ViewerPage() {
 
   if (error || !draft) {
     return (
-      <div className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
+      <div className="min-h-screen px-6 py-8 text-slate-100">
         <div className="mx-auto flex max-w-7xl flex-col gap-6 rounded-[32px] border border-slate-800 bg-slate-900/90 p-8 shadow-2xl shadow-slate-950/60">
           <p className="text-sm font-semibold uppercase tracking-[0.3em] text-[#18C964]">Viewer</p>
           <h1 className="text-4xl font-semibold tracking-tight text-white">Draft nebyl nalezen.</h1>
@@ -190,7 +190,7 @@ export default function ViewerPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
+    <div className="min-h-screen px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
       <div className="mx-auto flex max-w-1920 flex-col gap-6">
         <section className="rounded-[32px] border border-slate-800 bg-slate-900/90 p-6 shadow-2xl shadow-slate-950/60 sm:p-8 lg:p-10">
           <div className="flex flex-col gap-8 xl:flex-row xl:items-start xl:justify-between">

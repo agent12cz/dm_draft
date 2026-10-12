@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
@@ -15,11 +16,15 @@ export function Navbar() {
 
   return (
     <header className="sticky top-0 z-20 border-b border-white/10 bg-slate-950/80 backdrop-blur-xl">
-      <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4 lg:px-8">
+      <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3 lg:px-8">
         <Link href="/" className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#18C964] text-lg font-semibold text-slate-950 shadow-lg shadow-[#18C964]/20">
-            D
-          </div>
+          <Image
+            src="/logos/nhl/group_breaks.png"
+            alt="Group Breaks Hockey Cards"
+            width={1955}
+            height={1827}
+            className="h-12 w-auto shrink-0 object-contain"
+          />
           <div>
             <p className="text-sm font-semibold tracking-[0.2em] text-slate-300 uppercase">
               DM Draft

@@ -176,7 +176,7 @@ function ProductsPageContent() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen text-slate-100">
       <Navbar />
       <PageContainer className="py-8 lg:py-10">
         <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">

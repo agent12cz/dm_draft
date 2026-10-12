@@ -271,7 +271,7 @@ function HomeContent() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="text-slate-100">
       <Navbar />
       <PageContainer className="py-8 lg:py-10">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">

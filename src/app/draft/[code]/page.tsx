@@ -1354,7 +1354,7 @@ function DraftDetailPageContent() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <div className="mx-auto flex max-w-6xl flex-col gap-6">
@@ -1374,7 +1374,7 @@ function DraftDetailPageContent() {
 
   if (!draft) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <div className="mx-auto flex max-w-6xl flex-col gap-6">
@@ -1393,7 +1393,7 @@ function DraftDetailPageContent() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen text-slate-100">
       <Navbar />
       <PageContainer className="py-8 lg:py-10">
         <div className="mx-auto flex max-w-7xl flex-col gap-6">

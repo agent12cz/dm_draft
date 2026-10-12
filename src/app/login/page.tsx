@@ -59,7 +59,7 @@ export default function LoginPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <div className="mx-auto flex max-w-lg flex-col gap-6">
@@ -75,7 +75,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="text-slate-100">
       <Navbar />
       <PageContainer className="py-8 lg:py-10">
         <div className="mx-auto flex max-w-lg flex-col gap-6">

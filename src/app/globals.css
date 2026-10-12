@@ -22,11 +22,31 @@ html {
 
 body {
   margin: 0;
-  background: var(--background);
+  background: transparent;
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
 
 a {
   text-decoration: none;
+}
+
+.dm-background {
+  position: relative;
+  isolation: isolate;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.dm-background::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: #020617;
+  background-image: linear-gradient(rgba(2, 6, 23, 0.6), rgba(2, 6, 23, 0.6)), url("/logos/nhl/pozadi.png");
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
 }

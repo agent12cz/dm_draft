@@ -66,7 +66,7 @@ function JoinDraftPageContent() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(24,201,100,0.2),_transparent_35%),linear-gradient(135deg,_#020617_0%,_#0f172a_60%,_#111827_100%)] text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <Navbar />
         <PageContainer>
           <div className="flex flex-1 flex-col justify-center">
@@ -81,7 +81,7 @@ function JoinDraftPageContent() {
   }
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(24,201,100,0.2),_transparent_35%),linear-gradient(135deg,_#020617_0%,_#0f172a_60%,_#111827_100%)] text-slate-100">
+    <div className="min-h-screen text-slate-100">
       <Navbar />
       <PageContainer>
         <div className="flex flex-1 flex-col justify-center">

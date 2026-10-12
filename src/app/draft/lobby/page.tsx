@@ -17,7 +17,7 @@ function DraftLobbyContent() {
   const draftCode = "DRAFT-" + (searchParams.get("name") ?? "ROOM").slice(0, 4).toUpperCase();
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(24,201,100,0.2),_transparent_35%),linear-gradient(135deg,_#020617_0%,_#0f172a_60%,_#111827_100%)] text-slate-100">
+    <div className="min-h-screen text-slate-100">
       <Navbar />
       <PageContainer>
         <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
@@ -94,7 +94,7 @@ function DraftLobbyContent() {
 export default function DraftLobbyPage() {
   return (
     <AuthGuard>
-      <Suspense fallback={<div className="min-h-screen bg-slate-950" />}> 
+      <Suspense fallback={<div className="min-h-screen" />}>
         <DraftLobbyContent />
       </Suspense>
     </AuthGuard>

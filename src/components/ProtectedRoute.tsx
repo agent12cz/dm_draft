@@ -28,7 +28,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (!loading && user && !isAdmin) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <div className="mx-auto flex min-h-screen max-w-3xl items-center justify-center px-6 py-16">
           <div className="w-full rounded-[32px] border border-slate-800 bg-slate-900/90 p-8 text-center shadow-2xl shadow-slate-950/60">
             <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">Přístup odepřen</p>
@@ -57,7 +57,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <div className="mx-auto flex min-h-screen max-w-3xl items-center justify-center px-6 py-16">
           <div className="w-full rounded-[32px] border border-slate-800 bg-slate-900/90 p-8 text-center shadow-2xl shadow-slate-950/60">
             <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">Přihlášení</p>

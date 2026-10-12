@@ -560,7 +560,7 @@ export default function PlayerDraftPage() {
 
   if (authLoading || isLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
@@ -574,7 +574,7 @@ export default function PlayerDraftPage() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
@@ -595,7 +595,7 @@ export default function PlayerDraftPage() {
 
   if (!draft) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
@@ -609,7 +609,7 @@ export default function PlayerDraftPage() {
 
   if (!hasPlayAccess) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="min-h-screen text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
@@ -630,7 +630,7 @@ export default function PlayerDraftPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen text-slate-100">
       <Navbar />
       <PageContainer className="py-8 lg:py-10">
         <div className="mx-auto flex max-w-7xl flex-col gap-6">
