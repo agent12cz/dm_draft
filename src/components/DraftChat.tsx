@@ -10,6 +10,8 @@ type DraftChatProps = {
   draftCode?: string | null;
   currentUser: User | null;
   currentUserRole: "admin" | "participant" | null;
+  className?: string;
+  isEmbedded?: boolean;
 };
 
 type DraftMessage = {
@@ -38,7 +40,7 @@ function formatMessageTime(createdAt: DraftMessage["createdAt"]) {
   return "";
 }
 
-export function DraftChat({ draftId, draftCode, currentUser, currentUserRole }: DraftChatProps) {
+export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, className = "", isEmbedded = false }: DraftChatProps) {
   const [resolvedDraftId, setResolvedDraftId] = useState<string | null>(draftId ?? null);
   const [messages, setMessages] = useState<DraftMessage[]>([]);
   const [inputText, setInputText] = useState("");
@@ -274,8 +276,104 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole }: 
     return null;
   }
 
+  const content = (
+    <div className={`flex flex-col ${isEmbedded ? "h-full" : "h-[420px] rounded-2xl border border-slate-800 bg-slate-950/70"} overflow-hidden`}>
+      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        {isLoadingMessages ? (
+          <div className="flex h-full items-center justify-center text-sm text-slate-400">
+            Načítám zprávy...
+          </div>
+        ) : messages.length > 0 ? (
+          messages.map((message) => {
+            const isOwnMessage = message.userId === currentUser.uid;
+            return (
+              <div key={message.id} className={`flex ${isOwnMessage ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={`max-w-[85%] rounded-2xl border px-3.5 py-2.5 shadow-sm ${
+                    isOwnMessage
+                      ? "border-[#18C964]/30 bg-[#18C964]/15 text-slate-100"
+                      : "border-slate-800 bg-slate-900/90 text-slate-200"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <p className={`text-xs font-semibold ${isOwnMessage ? "text-[#8ef0b5]" : "text-slate-300"}`}>
+                      {message.displayName}
+                    </p>
+                    {message.role === "admin" ? (
+                      <span className="rounded-full border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                        Admin
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-100">{message.text}</p>
+                  <p className="mt-1.5 text-[10px] uppercase tracking-wider text-slate-400">
+                    {formatMessageTime(message.createdAt)}
+                  </p>
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-1 text-center text-sm text-slate-400">
+            <span className="text-2xl">💬</span>
+            <p className="font-medium text-slate-300">Zatím žádné zprávy</p>
+            <p className="text-xs text-slate-500">Buďte první a napište zprávu ostatním účastníkům.</p>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <form onSubmit={handleSendMessage} className="border-t border-slate-800/80 bg-slate-900/90 p-3">
+        <label className="grid gap-1.5 text-xs font-medium text-slate-300">
+          <div className="flex items-center justify-between">
+            <span>Napsat zprávu</span>
+            <span className="text-[11px] text-slate-500">{inputText.length}/500</span>
+          </div>
+          <textarea
+            value={inputText}
+            onChange={(event) => setInputText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void handleSendMessage();
+              }
+            }}
+            placeholder="Napište zprávu (Enter pro odeslání)..."
+            disabled={!canSend || isSending}
+            maxLength={500}
+            rows={2}
+            className="w-full resize-none rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-[#18C964]/60 focus:ring-1 focus:ring-[#18C964]/30 disabled:cursor-not-allowed disabled:opacity-60"
+          />
+        </label>
+
+        <div className="mt-2 flex items-center justify-end">
+          <button
+            type="submit"
+            disabled={!canSend || isSending || !inputText.trim()}
+            className="rounded-xl bg-[#18C964] px-4 py-1.5 text-xs font-bold text-slate-950 transition hover:bg-[#13b15a] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isSending ? "Odesílám..." : "Odeslat"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+
+  if (isEmbedded) {
+    return (
+      <div className={`flex flex-col ${className}`}>
+        {chatError ? (
+          <div className="mb-3 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            {chatError}
+          </div>
+        ) : null}
+        {content}
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-[28px] border border-slate-800 bg-slate-900/90 p-4 shadow-2xl shadow-slate-950/60 sm:p-5">
+    <div className={`rounded-[28px] border border-slate-800 bg-slate-900/90 p-4 shadow-2xl shadow-slate-950/60 sm:p-5 ${className}`}>
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">Chat draftu</p>
@@ -292,76 +390,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole }: 
         </div>
       ) : null}
 
-      <div className="mt-4 flex h-[360px] flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70">
-        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-          {isLoadingMessages ? (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">
-              Načítám zprávy...
-            </div>
-          ) : messages.length > 0 ? (
-            messages.map((message) => {
-              const isOwnMessage = message.userId === currentUser.uid;
-              return (
-                <div key={message.id} className={`flex ${isOwnMessage ? "justify-end" : "justify-start"}`}>
-                  <div className={`max-w-[85%] rounded-2xl border px-3 py-2 ${isOwnMessage ? "border-[#18C964]/20 bg-[#18C964]/10" : "border-slate-800 bg-slate-900/80"}`}>
-                    <div className="flex items-center gap-2">
-                      <p className={`text-sm font-semibold ${isOwnMessage ? "text-[#8ef0b5]" : "text-white"}`}>
-                        {message.displayName}
-                      </p>
-                      {message.role === "admin" ? (
-                        <span className="rounded-full border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400">
-                          Admin
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-slate-200">{message.text}</p>
-                    <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-slate-500">
-                      {formatMessageTime(message.createdAt)}
-                    </p>
-                  </div>
-                </div>
-              );
-            })
-          ) : (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">
-              Zatím žádné zprávy. Zadejte první zprávu.
-            </div>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        <form onSubmit={handleSendMessage} className="border-t border-slate-800 bg-slate-900/80 p-3">
-          <label className="grid gap-2 text-sm font-medium text-slate-300">
-            <span>Vaše zpráva</span>
-            <textarea
-              value={inputText}
-              onChange={(event) => setInputText(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void handleSendMessage();
-                }
-              }}
-              placeholder="Napište zprávu..."
-              disabled={!canSend || isSending}
-              maxLength={500}
-              rows={3}
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-[#18C964]/50 disabled:cursor-not-allowed disabled:opacity-60"
-            />
-          </label>
-
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-            <p className="text-xs text-slate-500">{inputText.length}/500 znaků</p>
-            <button
-              type="submit"
-              disabled={!canSend || isSending}
-              className="rounded-2xl bg-[#18C964] px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a] disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              {isSending ? "Odesílám..." : "Odeslat"}
-            </button>
-          </div>
-        </form>
-      </div>
+      <div className="mt-4">{content}</div>
     </div>
   );
 }

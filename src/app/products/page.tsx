@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import Link from "next/link";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
@@ -180,16 +181,26 @@ function ProductsPageContent() {
       <Navbar />
       <PageContainer className="py-8 lg:py-10">
         <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
-          <div className="space-y-3">
-            <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">
-              Správa boxů
-            </p>
-            <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-              Boxy
-            </h1>
-            <p className="text-lg leading-8 text-slate-400">
-              Vytvářejte nové produkty a spravujte jejich základní cenu pro budoucí drafty.
-            </p>
+          <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+            <div className="space-y-3">
+              <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">
+                Správa boxů
+              </p>
+              <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+                Boxy
+              </h1>
+              <p className="text-lg leading-8 text-slate-400">
+                Vytvářejte nové produkty a spravujte jejich základní cenu pro budoucí drafty.
+              </p>
+            </div>
+
+            <Link
+              href="/rankings"
+              className="inline-flex items-center gap-2 rounded-2xl border border-[#18C964]/30 bg-[#18C964]/10 px-4 py-2.5 text-xs font-bold text-[#8ef0b5] transition hover:bg-[#18C964]/20 self-start sm:self-auto"
+            >
+              <span>🏒 Žebříčky atraktivity týmů</span>
+              <span>→</span>
+            </Link>
           </div>
 
           <Card className="space-y-6">

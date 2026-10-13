@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import type { Timestamp } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
 import { normalizeDraftItem } from "@/lib/snakeDraft";
+import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import AuthGuard from "@/app/auth-guard";
 import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
@@ -46,6 +46,15 @@ type DraftItem = {
   logo: string;
 };
 
+type DraftBox = {
+  productId?: string;
+  productName: string;
+  productSeason: string;
+  boxCount: number;
+  boxPrice: number;
+  productImageUrl?: string;
+};
+
 type Draft = {
   id: string;
   title: string;
@@ -69,6 +78,9 @@ type Draft = {
   history: DraftHistoryItem[];
   turnDurationSeconds: number | null;
   turnStartedAt?: unknown;
+  boxes?: DraftBox[];
+  teamRanking?: string[];
+  teamRankingLocked?: boolean;
 };
 
 type TurnDurationOption = "none" | "10" | "15" | "20" | "30" | "45" | "60" | "custom";
@@ -159,6 +171,12 @@ function DraftDetailPageContent() {
   const [replaceError, setReplaceError] = useState<string | null>(null);
   const [turnDurationOption, setTurnDurationOption] = useState<TurnDurationOption>("15");
   const [customTurnDurationSeconds, setCustomTurnDurationSeconds] = useState("15");
+  const [rankingOrder, setRankingOrder] = useState<string[]>([]);
+  const [isSavingRanking, setIsSavingRanking] = useState(false);
+  const [rankingFeedback, setRankingFeedback] = useState<string | null>(null);
+  const [isRankingExpanded, setIsRankingExpanded] = useState(false);
+  const [draggedRankIndex, setDraggedRankIndex] = useState<number | null>(null);
+  const [dragOverRankIndex, setDragOverRankIndex] = useState<number | null>(null);
 
   const closeReplaceDialog = useCallback(() => {
     setReplaceSelection(null);
@@ -269,9 +287,17 @@ function DraftDetailPageContent() {
                 availableItemIds: (data.availableItemIds ?? []) as string[],
                 history: (data.history ?? []) as DraftHistoryItem[],
                 turnDurationSeconds: resolvedTurnDurationSeconds,
+                boxes: (data.boxes ?? []) as DraftBox[],
+                teamRanking: Array.isArray(data.teamRanking) ? (data.teamRanking as string[]) : undefined,
+                teamRankingLocked: Boolean(data.teamRankingLocked || (data.status && data.status !== "waiting")),
               };
 
               setDraft(draftData);
+              if (Array.isArray(data.teamRanking) && data.teamRanking.length > 0) {
+                setRankingOrder(ensureAllTeamsInOrder(data.teamRanking as string[]));
+              } else {
+                setRankingOrder(draftData.draftItems.map((item) => item.id));
+              }
               setParticipantNames(draftData.participants.map((participant) => participant.name));
               const nextOption = getTurnDurationOption(resolvedTurnDurationSeconds);
               setTurnDurationOption(nextOption);
@@ -490,6 +516,60 @@ function DraftDetailPageContent() {
 
     return draft.draftItems.find((item) => item.id === lastPickEntry.itemId) ?? null;
   }, [draft, lastPickEntry]);
+
+  const isRankingLocked = Boolean(!draft || draft.teamRankingLocked || draft.status !== "waiting");
+
+  const rankingTeamLookup = useMemo(() => {
+    const map = new Map<string, DraftItem>();
+    if (!draft) return map;
+    for (const item of draft.draftItems) {
+      map.set(item.id, item);
+    }
+    return map;
+  }, [draft]);
+
+  function handleMoveRankingTeam(fromIndex: number, direction: "up" | "down") {
+    if (isRankingLocked) return;
+    const toIndex = direction === "up" ? fromIndex - 1 : fromIndex + 1;
+    if (toIndex < 0 || toIndex >= rankingOrder.length) return;
+
+    const nextOrder = [...rankingOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, moved);
+    setRankingOrder(nextOrder);
+    setRankingFeedback("Změny v pořadí nejsou uloženy. Klikněte na 'Uložit pořadí'.");
+  }
+
+  function handleDropRankingTeam(fromIndex: number, toIndex: number) {
+    if (isRankingLocked || fromIndex === toIndex) return;
+    if (fromIndex < 0 || toIndex < 0 || fromIndex >= rankingOrder.length || toIndex >= rankingOrder.length) return;
+
+    const nextOrder = [...rankingOrder];
+    const [moved] = nextOrder.splice(fromIndex, 1);
+    nextOrder.splice(toIndex, 0, moved);
+    setRankingOrder(nextOrder);
+    setRankingFeedback("Změny v pořadí nejsou uloženy. Klikněte na 'Uložit pořadí'.");
+  }
+
+  async function handleSaveTeamRanking() {
+    if (!draft || draft.status !== "waiting" || isRankingLocked) return;
+    setIsSavingRanking(true);
+    setRankingFeedback(null);
+    try {
+      const { db, firestoreApi } = await getFirebaseClient();
+      const validOrder = ensureAllTeamsInOrder(rankingOrder);
+      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+        teamRanking: validOrder,
+        updatedAt: firestoreApi.serverTimestamp(),
+      });
+      setRankingFeedback("Žebříček byl úspěšně uložen do tohoto draftu.");
+    } catch (err) {
+      console.error(err);
+      setRankingFeedback("Nepodařilo se uložit žebříček.");
+    } finally {
+      setIsSavingRanking(false);
+    }
+  }
 
   async function updateDraft(updates: Partial<Draft>) {
     if (!draft) {
@@ -980,12 +1060,21 @@ function DraftDetailPageContent() {
 
     try {
       const { db, firestoreApi } = await getFirebaseClient();
+      const finalTeamRanking =
+        rankingOrder.length > 0
+          ? ensureAllTeamsInOrder(rankingOrder)
+          : draft.teamRanking && draft.teamRanking.length > 0
+            ? ensureAllTeamsInOrder(draft.teamRanking)
+            : draft.draftItems.map((item) => item.id);
+
       await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
         participants: nextParticipants,
         status: "drafting",
         turnDurationSeconds: draft.turnDurationSeconds,
         turnStartedAt: firestoreApi.serverTimestamp(),
         updatedAt: firestoreApi.serverTimestamp(),
+        teamRanking: finalTeamRanking,
+        teamRankingLocked: true,
       });
     } catch (startError) {
       console.error(startError);
@@ -1033,6 +1122,7 @@ function DraftDetailPageContent() {
         const latestStatus = latestData.status ?? "waiting";
         const latestPickOrder = (latestData.pickOrder ?? []) as number[];
         const latestCurrentPickIndex = Number(latestData.currentPickIndex ?? 0);
+        const latestAvailableItemIds = (latestData.availableItemIds ?? []) as string[];
         const latestHistory = (latestData.history ?? []) as DraftHistoryItem[];
         const latestCurrentParticipantIndex = latestPickOrder[latestCurrentPickIndex];
         const expectedCurrentPickIndex = draft.currentPickIndex;
@@ -1051,7 +1141,10 @@ function DraftDetailPageContent() {
         }
 
         const nextPickIndex = latestCurrentPickIndex + 1;
-        const nextStatus = nextPickIndex >= latestPickOrder.length ? "completed" : "drafting";
+        const nextStatus =
+          nextPickIndex >= latestPickOrder.length || latestAvailableItemIds.length === 0
+            ? "completed"
+            : "drafting";
         const nextHistory = [
           ...latestHistory,
           {
@@ -1131,11 +1224,14 @@ function DraftDetailPageContent() {
         }
 
         const nextPickIndex = latestCurrentPickIndex + 1;
-        const nextStatus = nextPickIndex >= latestPickOrder.length ? "completed" : "drafting";
+        const nextAvailableItemIds = latestAvailableItemIds.filter((availableItemId) => availableItemId !== item.id);
+        const nextStatus =
+          nextPickIndex >= latestPickOrder.length || nextAvailableItemIds.length === 0
+            ? "completed"
+            : "drafting";
         const nextParticipants = latestParticipants.map((participant, index) =>
           index === latestCurrentParticipantIndex ? { ...participant, picks: [...participant.picks, item.id] } : participant,
         );
-        const nextAvailableItemIds = latestAvailableItemIds.filter((availableItemId) => availableItemId !== item.id);
         const nextHistory = [
           ...latestHistory,
           {
@@ -1747,6 +1843,180 @@ function DraftDetailPageContent() {
             ) : null}
           </Card>
 
+          {/* ŽEBŘÍČEK ATRAKTIVITY TÝMŮ CARD */}
+          <Card className="space-y-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-2xl font-semibold text-white">Žebříček atraktivity týmů NHL</h2>
+                  <span
+                    className={`rounded-full px-2.5 py-0.5 text-xs font-bold uppercase tracking-wider ${
+                      isRankingLocked
+                        ? "border border-amber-500/40 bg-amber-950/40 text-amber-300"
+                        : "border border-emerald-500/40 bg-emerald-950/40 text-[#8ef0b5]"
+                    }`}
+                  >
+                    {isRankingLocked ? "Uzamčeno pro tento draft" : "K úpravě před startem"}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-slate-400">
+                  {isRankingLocked
+                    ? "Žebříček je uzamčen pro tento konkrétní draft. Změny v administraci žebříčků produktů tento draft neovlivní."
+                    : "Společný žebříček vypočtený ze zvolených boxů. Pořadí můžete ručně upravit a uložit ještě před zahájením draftu."}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {!isRankingLocked && (
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveTeamRanking()}
+                    disabled={isSavingRanking || isUpdating}
+                    className="rounded-2xl bg-[#18C964] px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a] disabled:opacity-50"
+                  >
+                    {isSavingRanking ? "Ukládám..." : "Uložit pořadí žebříčku"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsRankingExpanded((prev) => !prev)}
+                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-3.5 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  {isRankingExpanded ? "Skrýt všech 32 týmů ▲" : "Zobrazit a upravit 32 týmů ▼"}
+                </button>
+              </div>
+            </div>
+
+            {rankingFeedback && (
+              <p className={`text-sm ${rankingFeedback.includes("Nepodařilo") ? "text-red-300" : "text-[#8ef0b5]"}`}>
+                {rankingFeedback}
+              </p>
+            )}
+
+            {/* Quick preview of top 8 teams */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold text-slate-500">Nejatraktivnější týmy:</span>
+              {rankingOrder.slice(0, 8).map((teamId, idx) => {
+                const team = rankingTeamLookup.get(teamId);
+                return (
+                  <div
+                    key={teamId}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/80 px-2.5 py-1 text-xs text-slate-200"
+                  >
+                    <span className="font-bold text-[#8ef0b5]">#{idx + 1}</span>
+                    {team && <TeamLogo item={team} className="h-4 w-4" />}
+                    <span className="truncate max-w-[90px]">{team?.name.split(" ").pop() ?? teamId}</span>
+                  </div>
+                );
+              })}
+              {rankingOrder.length > 8 && (
+                <span className="text-xs text-slate-500">+ dalších {rankingOrder.length - 8} týmů</span>
+              )}
+            </div>
+
+            {/* Full 32 teams interactive list */}
+            {isRankingExpanded && (
+              <div className="mt-4 space-y-3 border-t border-slate-800 pt-4">
+                <p className="text-xs text-slate-400">
+                  {isRankingLocked
+                    ? "Pořadí všech 32 týmů (po spuštění draftu již nelze měnit):"
+                    : "Pořadí můžete upravit přetažením myší nebo pomocí šipek ▲ / ▼. Nezapomeňte změny uložit."}
+                </p>
+
+                <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 max-h-[460px] overflow-y-auto pr-1">
+                  {rankingOrder.map((teamId, index) => {
+                    const team = rankingTeamLookup.get(teamId);
+                    const isDragging = draggedRankIndex === index;
+                    const isTarget = dragOverRankIndex === index;
+
+                    return (
+                      <div
+                        key={teamId}
+                        draggable={!isRankingLocked}
+                        onDragStart={(e) => {
+                          if (isRankingLocked) return;
+                          e.dataTransfer.setData("text/plain", String(index));
+                          setDraggedRankIndex(index);
+                        }}
+                        onDragOver={(e) => {
+                          if (isRankingLocked) return;
+                          e.preventDefault();
+                          if (dragOverRankIndex !== index) setDragOverRankIndex(index);
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverRankIndex === index) setDragOverRankIndex(null);
+                        }}
+                        onDrop={(e) => {
+                          if (isRankingLocked) return;
+                          e.preventDefault();
+                          const fromIdx = Number(e.dataTransfer.getData("text/plain"));
+                          if (!Number.isNaN(fromIdx)) {
+                            handleDropRankingTeam(fromIdx, index);
+                          }
+                          setDraggedRankIndex(null);
+                          setDragOverRankIndex(null);
+                        }}
+                        onDragEnd={() => {
+                          setDraggedRankIndex(null);
+                          setDragOverRankIndex(null);
+                        }}
+                        className={`flex items-center justify-between gap-2 rounded-xl border p-2 text-xs transition-all select-none ${
+                          !isRankingLocked ? "cursor-grab active:cursor-grabbing" : ""
+                        } ${
+                          isDragging
+                            ? "opacity-30 border-dashed border-[#18C964]"
+                            : isTarget
+                              ? "border-2 border-[#18C964] bg-emerald-950/40"
+                              : "border-slate-800 bg-slate-900/80 hover:border-slate-700"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {!isRankingLocked && <span className="text-slate-600 font-mono text-[10px]">⋮⋮</span>}
+                          <span
+                            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-black ${
+                              index === 0
+                                ? "bg-amber-400 text-slate-950"
+                                : index === 1
+                                  ? "bg-slate-300 text-slate-950"
+                                  : index === 2
+                                    ? "bg-amber-700 text-white"
+                                    : "bg-slate-800 text-slate-300"
+                            }`}
+                          >
+                            {index + 1}
+                          </span>
+                          {team && <TeamLogo item={team} className="h-5 w-5" />}
+                          <span className="truncate font-semibold text-white">{team?.name || teamId}</span>
+                        </div>
+
+                        {!isRankingLocked && (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleMoveRankingTeam(index, "up")}
+                              disabled={index === 0}
+                              className="h-5 w-5 rounded border border-slate-800 bg-slate-950 text-[10px] text-slate-400 hover:text-white disabled:opacity-20"
+                            >
+                              ▲
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleMoveRankingTeam(index, "down")}
+                              disabled={index === rankingOrder.length - 1}
+                              className="h-5 w-5 rounded border border-slate-800 bg-slate-950 text-[10px] text-slate-400 hover:text-white disabled:opacity-20"
+                            >
+                              ▼
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </Card>
+
           <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
             <Card className="space-y-5">
               <div
@@ -1878,6 +2148,30 @@ function DraftDetailPageContent() {
                     <p className="mt-2 text-lg font-semibold text-white">{draft.margin} Kč</p>
                   </div>
                 </div>
+
+                {draft.boxes && draft.boxes.length > 0 && (
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 space-y-2">
+                    <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                      Složení breaku ({draft.boxes.length} {draft.boxes.length === 1 ? "box" : "boxy/ů"})
+                    </p>
+                    <div className="grid gap-2">
+                      {draft.boxes.map((b, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-center justify-between rounded-xl border border-slate-800/80 bg-slate-900/60 px-3 py-2 text-xs"
+                        >
+                          <div>
+                            <span className="font-bold text-white">{b.boxCount}× {b.productName}</span>
+                            <span className="ml-1 text-slate-400">({b.productSeason})</span>
+                          </div>
+                          <span className="font-semibold text-[#8ef0b5]">
+                            {b.boxPrice.toLocaleString("cs-CZ")} Kč / ks
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
                   <p className="text-sm text-slate-400">Cílová cena breaku</p>

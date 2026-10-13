@@ -7,11 +7,27 @@ import { useAuth } from "@/components/AuthProvider";
 
 export function Navbar() {
   const router = useRouter();
-  const { user, signOut } = useAuth();
+  const { user, isAdmin, signOut } = useAuth();
 
   async function handleLogout() {
     await signOut();
     router.replace("/login");
+  }
+
+  async function handleRegisterClick(e: React.MouseEvent) {
+    if (user) {
+      e.preventDefault();
+      await signOut();
+      router.push("/register");
+    }
+  }
+
+  async function handleLoginClick(e: React.MouseEvent) {
+    if (user) {
+      e.preventDefault();
+      await signOut();
+      router.push("/login");
+    }
   }
 
   return (
@@ -33,41 +49,63 @@ export function Navbar() {
           </div>
         </Link>
 
-        <nav className="hidden items-center gap-6 text-sm text-slate-400 md:flex">
-          <Link href="/" className="transition hover:text-white">
-            Přehled
-          </Link>
-          <Link href="/draft/new" className="transition hover:text-white">
-            Nový draft
-          </Link>
-          <Link href="/join" className="transition hover:text-white">
-            Připojit se
-          </Link>
-          <Link href="/register" className="transition hover:text-white">
-            Registrace
-          </Link>
-          <Link href="/products" className="transition hover:text-white">
-            Boxy
-          </Link>
-          {user ? (
-            <button
-              type="button"
-              onClick={() => void handleLogout()}
+        {isAdmin ? (
+          <nav className="hidden items-center gap-6 text-sm text-slate-400 md:flex">
+            <Link href="/" className="transition hover:text-white">
+              Přehled
+            </Link>
+            <Link href="/draft/new" className="transition hover:text-white">
+              Nový draft
+            </Link>
+            <Link href="/join" className="transition hover:text-white">
+              Připojit se
+            </Link>
+            <Link href="/register" className="transition hover:text-white">
+              Registrace
+            </Link>
+            <Link href="/products" className="transition hover:text-white">
+              Boxy
+            </Link>
+            <Link href="/rankings" className="transition hover:text-white">
+              Žebříčky
+            </Link>
+            {user ? (
+              <button
+                type="button"
+                onClick={() => void handleLogout()}
+                className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-slate-200 transition hover:bg-slate-800"
+              >
+                Odhlásit se
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Link href="/register" className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-slate-200 transition hover:bg-slate-800">
+                  Registrovat
+                </Link>
+                <Link href="/login" className="rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1.5 font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20">
+                  Přihlásit se
+                </Link>
+              </div>
+            )}
+          </nav>
+        ) : (
+          <nav className="flex items-center gap-2 text-sm md:gap-3">
+            <Link
+              href="/register"
+              onClick={user ? (e) => void handleRegisterClick(e) : undefined}
               className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-slate-200 transition hover:bg-slate-800"
             >
-              Odhlásit se
-            </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <Link href="/register" className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-slate-200 transition hover:bg-slate-800">
-                Registrovat
-              </Link>
-              <Link href="/login" className="rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1.5 font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20">
-                Přihlásit se
-              </Link>
-            </div>
-          )}
-        </nav>
+              Registrovat
+            </Link>
+            <Link
+              href="/login"
+              onClick={user ? (e) => void handleLoginClick(e) : undefined}
+              className="rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1.5 font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20"
+            >
+              Přihlásit
+            </Link>
+          </nav>
+        )}
       </div>
     </header>
   );
