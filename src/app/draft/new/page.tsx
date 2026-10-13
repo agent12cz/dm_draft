@@ -15,6 +15,7 @@ import {
   type CalculatedTeamRank,
 } from "@/lib/rankings";
 import AuthGuard from "@/app/auth-guard";
+import { useAuth } from "@/components/AuthProvider";
 
 type Product = {
   id: string;
@@ -58,6 +59,7 @@ const initialValues: DraftFormValues = {
 
 function NewDraftPageContent() {
   const router = useRouter();
+  const { user } = useAuth();
   const [formValues, setFormValues] = useState<DraftFormValues>(initialValues);
   const [products, setProducts] = useState<Product[]>([]);
   const [rankingsMap, setRankingsMap] = useState<Record<string, string[]>>({});
@@ -281,6 +283,12 @@ function NewDraftPageContent() {
     setIsSubmitting(true);
     setError(null);
 
+    if (!user) {
+      setError("Pro vytvoření draftu se musíte přihlásit.");
+      setIsSubmitting(false);
+      return;
+    }
+
     const trimmedTitle = formValues.draftName.trim();
     const trimmedSport = formValues.sport.trim();
     const margin = Number(formValues.margin);
@@ -367,6 +375,7 @@ function NewDraftPageContent() {
       const finalTeamRanking = ensureAllTeamsInOrder(activeTeamOrder);
 
       const draftData = {
+        ownerUserId: user.uid,
         title: trimmedTitle,
         sport: trimmedSport,
         // Boxes and Rankings extensions

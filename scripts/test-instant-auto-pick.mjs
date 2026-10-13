@@ -80,6 +80,7 @@ function firestoreFields(draft) {
 
 function expiredDraftFixture(overrides = {}) {
   return {
+    ownerUserId: "organizer-1",
     status: "drafting",
     participants: [
       { id: "participant-1", userId: "player-1", name: "Player 1", picks: [] },
@@ -356,6 +357,21 @@ console.log("Running instant automatic pick tests...");
   assert.equal(mock.getCommits().length, 1);
   assert.equal(mock.getDraft().currentPickIndex, 1);
   console.log("✓ Bez otevřené aplikace provede výběr záložní Cron");
+}
+
+{
+  const mock = createFirestoreMock(expiredDraftFixture());
+  const result = await runImmediateDraftPick(
+    workerEnv,
+    { draftId: "ABCDE", userId: "organizer-1", expectedPickIndex: 0 },
+    mock.fetchMock,
+  );
+
+  assert.equal(result.status, "picked");
+  assert.equal(mock.getCommits().length, 1);
+  assert.equal(mock.getDraft().currentPickIndex, 1);
+  assert.equal(mock.getDraft().history.at(-1).automatic, true);
+  console.log("✓ Organizátor bez účastnického místa může vyvolat okamžitý výběr");
 }
 
 {

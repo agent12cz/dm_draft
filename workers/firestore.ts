@@ -13,7 +13,7 @@ export type DraftWorkerEnv = {
 
 /** Extra server-side checks applied inside the Firestore transaction. */
 export type DraftPickGuard = {
-  /** The turn is only picked when this user is a participant of the draft. */
+  /** The turn is only picked when this user owns or participates in the draft. */
   userId?: string;
   /** The turn is only picked when the draft still waits for this pick index. */
   expectedPickIndex?: number;
@@ -341,6 +341,10 @@ function participantUserIds(fields: Record<string, unknown>) {
     : [];
 }
 
+function canRequestImmediatePick(fields: Record<string, unknown>, userId: string) {
+  return fields.ownerUserId === userId || participantUserIds(fields).includes(userId);
+}
+
 function asDocument(value: unknown): FirestoreDocument | null {
   return isRecord(value) && isRecord(value.document)
     ? (value.document as FirestoreDocument)
@@ -548,7 +552,7 @@ async function processExpiredDraft(
       }
 
       const fields = decodeFirestoreFields(document.fields);
-      if (guard?.userId && !participantUserIds(fields).includes(guard.userId)) {
+      if (guard?.userId && !canRequestImmediatePick(fields, guard.userId)) {
         return { status: "forbidden" };
       }
       if (fields.status !== "drafting") {
@@ -649,7 +653,7 @@ async function processExpiredDraft(
 }
 
 /**
- * Runs the automatic pick for a single draft on behalf of a signed-in participant.
+ * Runs the automatic pick for a single draft on behalf of its signed-in owner or participant.
  * It reuses the same transactional logic as the Cron Trigger, so a turn can never
  * be picked twice even when both paths run at the same time.
  */
