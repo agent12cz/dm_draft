@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "npx tsx scripts/test-rankings.mjs",
+    "test": "npx tsx scripts/test-rankings.mjs && npx tsx scripts/test-auto-pick.mjs",
     "lint": "eslint",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",

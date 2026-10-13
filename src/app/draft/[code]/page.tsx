@@ -37,6 +37,8 @@ type DraftHistoryItem = {
   oldItemName?: string;
   newItemId?: string;
   newItemName?: string;
+  automatic?: boolean;
+  autoPickReason?: "player-priorities" | "organizer-ranking";
 };
 
 type DraftItem = {
@@ -1162,6 +1164,8 @@ function DraftDetailPageContent() {
 
         if (nextStatus === "drafting") {
           nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
+        } else {
+          nextDraftUpdate.turnStartedAt = firestoreApi.deleteField();
         }
 
         transaction.update(draftRef, nextDraftUpdate);
@@ -1253,6 +1257,8 @@ function DraftDetailPageContent() {
 
         if (nextStatus === "drafting") {
           nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
+        } else {
+          nextDraftUpdate.turnStartedAt = firestoreApi.deleteField();
         }
 
         transaction.update(draftRef, nextDraftUpdate);
@@ -2284,7 +2290,14 @@ function DraftDetailPageContent() {
                               <div className="flex items-start justify-between gap-3">
                                 <div className="space-y-2">
                                   <p className="text-sm font-semibold text-white">{participantName}</p>
-                                  <p className="text-sm text-slate-400">vybral</p>
+                                  <p className="text-sm text-slate-400">
+                                    {entry.automatic ? "automaticky vybral" : "vybral"}
+                                    {entry.autoPickReason === "player-priorities"
+                                      ? " podle vlastních priorit"
+                                      : entry.autoPickReason === "organizer-ranking"
+                                        ? " podle žebříčku organizátora"
+                                        : ""}
+                                  </p>
                                 </div>
                                 <div className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
                                   Tah {index + 1}

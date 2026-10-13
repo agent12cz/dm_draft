@@ -12,7 +12,6 @@ function JoinDraftPageContent() {
   const router = useRouter();
   const { user, loading } = useAuth();
   const [draftCode, setDraftCode] = useState("");
-  const [verifiedCode, setVerifiedCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -40,7 +39,6 @@ function JoinDraftPageContent() {
       const draftRef = await firestoreApi.getDoc(firestoreApi.doc(db, "drafts", normalizedCode));
 
       if (!draftRef.exists()) {
-        setVerifiedCode(null);
         setError("Draft s tímto kódem nebyl nalezen.");
         return;
       }
@@ -50,13 +48,11 @@ function JoinDraftPageContent() {
       const isParticipant = participants.some((participant) => participant.userId === user.uid);
 
       if (!isParticipant) {
-        setVerifiedCode(null);
         setError("Nejste účastníkem tohoto draftu.");
         return;
       }
 
-      setVerifiedCode(normalizedCode);
-      setError(null);
+      router.replace(`/play/${normalizedCode}`);
     } catch {
       setError("Draft s tímto kódem nebyl nalezen.");
     } finally {
@@ -125,33 +121,6 @@ function JoinDraftPageContent() {
                 {isSubmitting ? "Ověřuji..." : "Pokračovat"}
               </button>
             </form>
-
-            {verifiedCode ? (
-              <div className="mt-6 rounded-2xl border border-[#18C964]/20 bg-[#18C964]/10 p-5">
-                <p className="text-sm font-semibold uppercase tracking-[0.24em] text-[#8ef0b5]">
-                  Draft byl nalezen
-                </p>
-                <p className="mt-3 text-lg font-semibold text-white">
-                  Jak chcete pokračovat?
-                </p>
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => router.push(`/view/${verifiedCode}`)}
-                    className="rounded-2xl border border-[#18C964]/20 bg-slate-950/80 px-4 py-3 text-sm font-semibold text-[#8ef0b5] transition hover:bg-slate-900"
-                  >
-                    Sledovat draft
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => router.push(`/play/${verifiedCode}`)}
-                    className="rounded-2xl bg-[#18C964] px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a]"
-                  >
-                    Otevřít hráčský režim
-                  </button>
-                </div>
-              </div>
-            ) : null}
           </Card>
         </div>
       </PageContainer>

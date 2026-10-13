@@ -29,6 +29,10 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
+## Automatic draft picks
+
+Expired turns are processed by the scheduled Firebase Function in `functions/src/index.ts`, so automatic picks do not depend on a participant keeping the draft page open. Deploy it to the same Firebase project as Firestore with `firebase deploy --only functions`. Scheduled functions require the Firebase project to use the Blaze plan and the function's runtime service account to have permission to update Firestore. The schedule checks once per minute, so an automatic pick can occur up to about one minute after a turn expires.
+
 ## Deploy on Vercel
 
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.

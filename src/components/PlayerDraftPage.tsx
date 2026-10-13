@@ -32,6 +32,8 @@ type DraftHistoryItem = {
   oldItemName?: string;
   newItemId?: string;
   newItemName?: string;
+  automatic?: boolean;
+  autoPickReason?: "player-priorities" | "organizer-ranking";
 };
 
 type DraftItem = {
@@ -822,6 +824,8 @@ export default function PlayerDraftPage() {
 
         if (nextStatus === "drafting") {
           nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
+        } else {
+          nextDraftUpdate.turnStartedAt = firestoreApi.deleteField();
         }
 
         transaction.update(draftRef, nextDraftUpdate);
@@ -859,7 +863,13 @@ export default function PlayerDraftPage() {
     }
 
     const pickedTeamName = historyEntry.selectedItem?.name ?? historyEntry.entry.itemName ?? "tým";
-    return `${historyEntry.participantName} vybral ${pickedTeamName}.`;
+    const pickVerb = historyEntry.entry.automatic ? "automaticky vybral" : "vybral";
+    const reason = historyEntry.entry.autoPickReason === "player-priorities"
+      ? " podle vlastních priorit"
+      : historyEntry.entry.autoPickReason === "organizer-ranking"
+        ? " podle žebříčku organizátora"
+        : "";
+    return `${historyEntry.participantName} ${pickVerb} ${pickedTeamName}${reason}.`;
   }
 
   if (authLoading || isLoading) {
