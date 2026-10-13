@@ -5,6 +5,7 @@ export type AutoPickParticipant = {
   name?: string;
   picks?: string[];
   priorities?: string[];
+  [key: string]: unknown;
 };
 
 export type AutoPickHistoryItem = {
@@ -18,6 +19,7 @@ export type AutoPickHistoryItem = {
   newItemName?: string;
   automatic?: boolean;
   autoPickReason?: AutoPickReason;
+  [key: string]: unknown;
 };
 
 export type AutoPickDraft = {
@@ -49,14 +51,14 @@ export function buildAutomaticPickUpdate(draft: AutoPickDraft): AutoPickUpdate |
   const participantPriorities = participant.userId
     ? draft.playerPriorities?.[participant.userId] ?? participant.priorities
     : participant.priorities;
-  const hasPlayerPriorities = Array.isArray(participantPriorities) && participantPriorities.length > 0;
-  const preferredOrder = hasPlayerPriorities
-    ? participantPriorities
-    : draft.teamRanking && draft.teamRanking.length > 0
-      ? draft.teamRanking
-      : draft.draftItems.map((item) => item.id);
-  const rankedTeamIds = [...new Set([...preferredOrder, ...draft.draftItems.map((item) => item.id)])];
-  const selectedItemId = rankedTeamIds.find((teamId) => draft.availableItemIds.includes(teamId));
+  const playerPriorityTeamId = participantPriorities?.find((teamId) =>
+    draft.availableItemIds.includes(teamId),
+  );
+  const organizerTeamId = [
+    ...(draft.teamRanking ?? []),
+    ...draft.draftItems.map((item) => item.id),
+  ].find((teamId) => draft.availableItemIds.includes(teamId));
+  const selectedItemId = playerPriorityTeamId ?? organizerTeamId;
 
   if (!selectedItemId) {
     return null;
@@ -87,7 +89,7 @@ export function buildAutomaticPickUpdate(draft: AutoPickDraft): AutoPickUpdate |
         itemId: selectedItemId,
         itemName: selectedItem?.name ?? selectedItemId,
         automatic: true,
-        autoPickReason: hasPlayerPriorities ? "player-priorities" : "organizer-ranking",
+        autoPickReason: playerPriorityTeamId ? "player-priorities" : "organizer-ranking",
       },
     ],
     status: nextStatus,
