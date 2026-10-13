@@ -197,6 +197,7 @@ export default function PlayerDraftPage() {
   const [dragOverPriorityIndex, setDragOverPriorityIndex] = useState<number | null>(null);
   const loadedDraftIdRef = useRef<string | null>(null);
   const lastTurnHandledRef = useRef<string | null>(null);
+  const autoPickRequestedTurnRef = useRef<string | null>(null);
   const hasInitializedTurnNotificationRef = useRef(false);
   const notificationPermissionRequestedRef = useRef(false);
 
@@ -506,6 +507,45 @@ export default function PlayerDraftPage() {
       !isSubmittingPick &&
       !isTurnExpired,
   );
+
+  const turnStartedAtMs = draft?.turnStartedAt?.toDate
+    ? draft.turnStartedAt.toDate().getTime()
+    : null;
+
+  // Po vypršení času požádá server o okamžitý automatický výběr.
+  // O samotném výběru rozhoduje výhradně server, Cron zůstává záložním řešením.
+  useEffect(() => {
+    if (!draft || !user || !isTurnExpired || isCompleted) {
+      return;
+    }
+
+    const turnKey = `${draft.id}-${draft.currentPickIndex}-${turnStartedAtMs ?? ""}`;
+    if (autoPickRequestedTurnRef.current === turnKey) {
+      return;
+    }
+
+    autoPickRequestedTurnRef.current = turnKey;
+
+    void (async () => {
+      try {
+        const idToken = await user.getIdToken();
+        await fetch("/api/draft/auto-pick", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({
+            draftId: draft.id,
+            currentPickIndex: draft.currentPickIndex,
+          }),
+        });
+      } catch (autoPickError) {
+        // Výběr dokončí záložní Cloudflare Cron, uživateli nehlásíme falešný stav.
+        console.error(autoPickError);
+      }
+    })();
+  }, [draft, isCompleted, isTurnExpired, turnStartedAtMs, user]);
 
   const filteredAvailableItems = useMemo(() => {
     const query = teamSearch.trim().toLowerCase();
@@ -1219,7 +1259,7 @@ export default function PlayerDraftPage() {
 
                   {isTurnExpired ? (
                     <div className="mt-3 rounded-xl border border-red-500/40 bg-red-500/15 px-3 py-2 text-center text-xs font-bold text-red-300">
-                      ⏰ Čas vypršel – čeká se na rozhodnutí admina.
+                      ⏰ Čas vypršel – probíhá automatický výběr…
                     </div>
                   ) : null}
                 </div>

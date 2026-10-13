@@ -11,6 +11,22 @@ export type DraftWorkerEnv = {
   FIREBASE_SERVICE_ACCOUNT_JSON: string;
 };
 
+/** Extra server-side checks applied inside the Firestore transaction. */
+export type DraftPickGuard = {
+  /** The turn is only picked when this user is a participant of the draft. */
+  userId?: string;
+  /** The turn is only picked when the draft still waits for this pick index. */
+  expectedPickIndex?: number;
+};
+
+export type DraftPickOutcome =
+  | { status: "picked"; itemId?: string; reason?: string; completed: boolean }
+  | {
+      status: "completed" | "changed" | "not-expired" | "missing" | "invalid" | "conflict" | "forbidden";
+    };
+
+const DRAFT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
 type ServiceAccount = {
   project_id?: string;
   client_email: string;
@@ -317,6 +333,14 @@ function decodeDraft(fields: Record<string, unknown>): AutoPickDraft | null {
   };
 }
 
+function participantUserIds(fields: Record<string, unknown>) {
+  return Array.isArray(fields.participants)
+    ? fields.participants.flatMap((participant) =>
+        isRecord(participant) && typeof participant.userId === "string" ? [participant.userId] : [],
+      )
+    : [];
+}
+
 function asDocument(value: unknown): FirestoreDocument | null {
   return isRecord(value) && isRecord(value.document)
     ? (value.document as FirestoreDocument)
@@ -489,7 +513,8 @@ async function processExpiredDraft(
   baseUrl: string,
   accessToken: string,
   documentName: string,
-) {
+  guard?: DraftPickGuard,
+): Promise<DraftPickOutcome> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const transactionResponse = await postJson<{ transaction?: string }>(
       request,
@@ -511,7 +536,7 @@ async function processExpiredDraft(
         { headers: { authorization: `Bearer ${accessToken}` } },
       );
       if (readResponse.status === 404) {
-        return "missing";
+        return { status: "missing" };
       }
 
       const document = await readJsonResponse<FirestoreDocument>(
@@ -519,12 +544,21 @@ async function processExpiredDraft(
         "Firestore transactional document read",
       );
       if (!isRecord(document.fields)) {
-        return "invalid";
+        return { status: "invalid" };
       }
 
       const fields = decodeFirestoreFields(document.fields);
+      if (guard?.userId && !participantUserIds(fields).includes(guard.userId)) {
+        return { status: "forbidden" };
+      }
       if (fields.status !== "drafting") {
-        return "changed";
+        return { status: "changed" };
+      }
+      if (
+        guard?.expectedPickIndex !== undefined &&
+        Number(fields.currentPickIndex ?? 0) !== guard.expectedPickIndex
+      ) {
+        return { status: "changed" };
       }
 
       const durationSeconds = Number(fields.turnDurationSeconds);
@@ -535,18 +569,18 @@ async function processExpiredDraft(
         startedAt === null ||
         startedAt + durationSeconds * 1000 > Date.now()
       ) {
-        return "not-expired";
+        return { status: "not-expired" };
       }
 
       const draft = decodeDraft(fields);
       if (!draft) {
-        return "invalid";
+        return { status: "invalid" };
       }
       const pickUpdate = buildAutomaticPickUpdate(draft);
       if (!pickUpdate) {
         const noRemainingPicks = draft.currentPickIndex >= draft.pickOrder.length;
         if (draft.availableItemIds.length > 0 && !noRemainingPicks) {
-          return "invalid";
+          return { status: "invalid" };
         }
 
         const completionFields = {
@@ -578,7 +612,7 @@ async function processExpiredDraft(
         }
         await readJsonResponse(completionResponse, "Firestore draft completion");
         transactionCommitted = true;
-        return "completed";
+        return { status: "completed" };
       }
 
       const commitResponse = await request(`${baseUrl}:commit`, {
@@ -603,7 +637,7 @@ async function processExpiredDraft(
         itemId: pickUpdate.history.at(-1)?.itemId,
         reason: pickUpdate.history.at(-1)?.autoPickReason,
         completed: pickUpdate.status === "completed",
-      } as const;
+      };
     } finally {
       if (!transactionCommitted && !transactionAborted) {
         await rollbackTransaction(request, baseUrl, accessToken, transaction);
@@ -611,7 +645,37 @@ async function processExpiredDraft(
     }
   }
 
-  return "conflict";
+  return { status: "conflict" };
+}
+
+/**
+ * Runs the automatic pick for a single draft on behalf of a signed-in participant.
+ * It reuses the same transactional logic as the Cron Trigger, so a turn can never
+ * be picked twice even when both paths run at the same time.
+ */
+export async function runImmediateDraftPick(
+  env: DraftWorkerEnv,
+  params: { draftId: string; userId: string; expectedPickIndex?: number },
+  request: typeof fetch = fetch,
+): Promise<DraftPickOutcome> {
+  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    throw new Error("FIREBASE_PROJECT_ID and FIREBASE_SERVICE_ACCOUNT_JSON must be configured.");
+  }
+  if (!params.userId) {
+    return { status: "forbidden" };
+  }
+  if (!DRAFT_ID_PATTERN.test(params.draftId)) {
+    return { status: "invalid" };
+  }
+
+  const accessToken = await getAccessToken(env, request);
+  const documentsBaseUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(env.FIREBASE_PROJECT_ID)}/databases/(default)/documents`;
+  const documentName = `projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/drafts/${params.draftId}`;
+
+  return processExpiredDraft(request, documentsBaseUrl, accessToken, documentName, {
+    userId: params.userId,
+    expectedPickIndex: params.expectedPickIndex,
+  });
 }
 
 export async function runExpiredDraftPicks(
@@ -638,7 +702,7 @@ export async function runExpiredDraftPicks(
         accessToken,
         draft.name,
       );
-      if (typeof result === "object" && result.status === "picked") {
+      if (result.status === "picked") {
         picked += 1;
         console.info("Automatic draft pick committed.", {
           draft: draft.name,
@@ -646,12 +710,12 @@ export async function runExpiredDraftPicks(
           reason: result.reason,
           completed: result.completed,
         });
-      } else if (result === "completed") {
+      } else if (result.status === "completed") {
         completed += 1;
-      } else if (result === "conflict") {
+      } else if (result.status === "conflict") {
         conflicts += 1;
         console.warn("Automatic pick conflicted with another draft update.", { draft: draft.name });
-      } else if (result === "invalid") {
+      } else if (result.status === "invalid") {
         console.error("Expired draft has invalid pick data and was not changed.", { draft: draft.name });
       }
     } catch (error) {
