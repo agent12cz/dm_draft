@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { buildAutomaticPickUpdate } from "../src/lib/autoPick.ts";
 import { defaultDraftItems } from "../src/lib/snakeDraft.js";
 import { calculateCombinedTeamRanking } from "../src/lib/rankings.js";
+import { getTimeLeftForTurn, getTurnKey } from "../src/lib/turnCountdown.ts";
 
 const teams = [
   { id: "team-a", name: "Team A" },
@@ -21,6 +22,19 @@ function draftFixture(overrides = {}) {
     playerPriorities: {},
     ...overrides,
   };
+}
+
+{
+  const previousTurnKey = getTurnKey("draft-1", 0, 1000);
+  const nextTurnKey = getTurnKey("draft-1", 1, 2000);
+  const previousTurnCountdown = { turnKey: previousTurnKey, seconds: 0 };
+  assert.equal(getTimeLeftForTurn(previousTurnCountdown, nextTurnKey), null);
+  assert.equal(getTimeLeftForTurn(previousTurnCountdown, previousTurnKey), 0);
+  assert.equal(
+    getTimeLeftForTurn({ turnKey: nextTurnKey, seconds: 30 }, nextTurnKey),
+    30,
+  );
+  console.log("✓ An expired countdown cannot trigger the next turn and its timer restarts");
 }
 
 {

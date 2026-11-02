@@ -9,6 +9,7 @@ import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
 import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
+import { getTimeLeftForTurn, getTurnKey, type TurnCountdown } from "@/lib/turnCountdown";
 import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
 
@@ -179,7 +180,7 @@ export default function PlayerDraftPage() {
 
     return window.localStorage.getItem("dm-draft-sound-enabled") !== "false";
   });
-  const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [turnCountdown, setTurnCountdown] = useState<TurnCountdown | null>(null);
   const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false);
   const [teamSearch, setTeamSearch] = useState("");
   const [mainTab, setMainTab] = useState<"teams" | "priorities" | "ranking">("teams");
@@ -200,6 +201,13 @@ export default function PlayerDraftPage() {
   const autoPickRequestedTurnRef = useRef<string | null>(null);
   const hasInitializedTurnNotificationRef = useRef(false);
   const notificationPermissionRequestedRef = useRef(false);
+  const turnStartedAtMs = draft?.turnStartedAt?.toDate
+    ? draft.turnStartedAt.toDate().getTime()
+    : null;
+  const currentTurnKey = draft
+    ? getTurnKey(draft.id, draft.currentPickIndex, turnStartedAtMs)
+    : null;
+  const timeLeft = getTimeLeftForTurn(turnCountdown, currentTurnKey);
 
   useEffect(() => {
     if (!code) {
@@ -286,16 +294,21 @@ export default function PlayerDraftPage() {
       return;
     }
 
-    const startedAt = draft.turnStartedAt?.toDate ? draft.turnStartedAt.toDate().getTime() : null;
+    const startedAt = turnStartedAtMs;
+    const turnKey = currentTurnKey;
+    if (!turnKey) {
+      return;
+    }
+
     const totalSeconds = draft.turnDurationSeconds;
     const updateCountdown = () => {
-      if (!startedAt) {
-        setTimeLeft(totalSeconds);
+      if (startedAt === null) {
+        setTurnCountdown({ turnKey, seconds: totalSeconds });
         return;
       }
 
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-      setTimeLeft(Math.max(0, totalSeconds - elapsed));
+      setTurnCountdown({ turnKey, seconds: Math.max(0, totalSeconds - elapsed) });
     };
 
     updateCountdown();
@@ -304,9 +317,8 @@ export default function PlayerDraftPage() {
 
     return () => {
       window.clearInterval(intervalId);
-      setTimeLeft(null);
     };
-  }, [draft]);
+  }, [currentTurnKey, draft, turnStartedAtMs]);
 
   const closeHistoryDialog = useCallback(() => {
     setIsHistoryDialogOpen(false);
@@ -380,7 +392,11 @@ export default function PlayerDraftPage() {
     const currentParticipantIndex = draft.pickOrder[draft.currentPickIndex] ?? null;
     const currentParticipant = draft.participants[currentParticipantIndex as number] ?? null;
     const isCurrentUserTurn = Boolean(currentParticipant?.userId && currentParticipant.userId === user.uid);
-    const turnKey = `${draft.id}-${draft.currentPickIndex}-${draft.turnStartedAt?.toDate ? draft.turnStartedAt.toDate().getTime() : ""}`;
+    const turnKey = getTurnKey(
+      draft.id,
+      draft.currentPickIndex,
+      draft.turnStartedAt?.toDate ? draft.turnStartedAt.toDate().getTime() : null,
+    );
 
     if (!hasInitializedTurnNotificationRef.current) {
       const storedTurnKey = typeof window !== "undefined"
@@ -508,10 +524,6 @@ export default function PlayerDraftPage() {
       !isTurnExpired,
   );
 
-  const turnStartedAtMs = draft?.turnStartedAt?.toDate
-    ? draft.turnStartedAt.toDate().getTime()
-    : null;
-
   // Po vypršení času požádá server o okamžitý automatický výběr.
   // O samotném výběru rozhoduje výhradně server, Cron zůstává záložním řešením.
   useEffect(() => {
@@ -519,7 +531,11 @@ export default function PlayerDraftPage() {
       return;
     }
 
-    const turnKey = `${draft.id}-${draft.currentPickIndex}-${turnStartedAtMs ?? ""}`;
+    const turnKey = currentTurnKey;
+    if (!turnKey) {
+      return;
+    }
+
     if (autoPickRequestedTurnRef.current === turnKey) {
       return;
     }
@@ -545,7 +561,7 @@ export default function PlayerDraftPage() {
         console.error(autoPickError);
       }
     })();
-  }, [draft, isCompleted, isTurnExpired, turnStartedAtMs, user]);
+  }, [currentTurnKey, draft, isCompleted, isTurnExpired, user]);
 
   const filteredAvailableItems = useMemo(() => {
     const query = teamSearch.trim().toLowerCase();

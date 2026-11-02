@@ -213,6 +213,11 @@ function createFirestoreMock(initialDraft) {
     getCommits: () => appliedCommits,
     getCommitAttempts: () => commitAttempts,
     getCallCount: () => callCount,
+    expireCurrentTurn: () => {
+      current.turnStartedAt = new Date(
+        Date.now() - Number(current.turnDurationSeconds) * 1000 - 1,
+      ).toISOString();
+    },
   };
 }
 
@@ -233,6 +238,34 @@ console.log("Running instant automatic pick tests...");
   assert.equal(mock.getDraft().history.at(-1).automatic, true);
   assert.equal(mock.getDraft().history.at(-1).itemId, "team-b");
   console.log("✓ Čas vyprší mezi spuštěními Cronu a výběr proběhne okamžitě");
+}
+
+{
+  const mock = createFirestoreMock(expiredDraftFixture());
+  const first = await runImmediateDraftPick(
+    workerEnv,
+    { draftId: "ABCDE", userId: "player-1", expectedPickIndex: 0 },
+    mock.fetchMock,
+  );
+  const firstTurnStartedAt = mock.getDraft().turnStartedAt;
+  assert.notEqual(firstTurnStartedAt, expiredDraftFixture().turnStartedAt);
+  mock.expireCurrentTurn();
+  const second = await runImmediateDraftPick(
+    workerEnv,
+    { draftId: "ABCDE", userId: "player-2", expectedPickIndex: 1 },
+    mock.fetchMock,
+  );
+
+  assert.equal(first.status, "picked");
+  assert.equal(first.completed, false);
+  assert.equal(second.status, "picked");
+  assert.equal(second.completed, true);
+  assert.equal(mock.getDraft().currentPickIndex, 2);
+  assert.equal(mock.getDraft().status, "completed");
+  assert.equal(mock.getDraft().history.length, 2);
+  assert.equal(mock.getDraft().history.every((entry) => entry.automatic), true);
+  assert.equal(mock.getCommits().length, 2);
+  console.log("✓ Dva automatické výběry po sobě zahájí nový tah a dokončí draft");
 }
 
 {
