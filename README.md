@@ -33,6 +33,10 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 
 The shared `Navbar` uses the root `AuthProvider` for authentication on every page, including player and organizer draft pages. While authentication loads it shows a loading status, not signed-out links. Signed-in users see their profile name, Firebase display name or email and a sign-out button on both mobile and desktop, regardless of role. Signing out uses the existing Firebase context and returns to the login page; errors are shown without switching to a false signed-out state. `npm test` includes account-menu rendering tests for loading, signed-in, signed-out and logout states.
 
+## Player room chat
+
+On `/play/[code]`, a single chat panel stays mounted above My Teams in the secondary column, independently of the participant/history and team-selection tabs. On smaller screens the columns stack and the navigation buttons wrap. The bounded message list scrolls internally and follows new messages while the reader is near the bottom; scrolling up preserves the reading position, and sending a message resumes following. Draft updates do not reset the composer or recreate the chat's access/messages subscriptions. `npm test` includes mocked lifecycle checks for those behaviors and a structural check of the panel placement.
+
 ## Automatic draft picks
 
 Expired turns are processed by a Cloudflare Cron Trigger once per minute. The custom Worker entry point in `worker.ts` preserves the OpenNext `fetch` handler and adds the scheduled handler. The Worker uses the Firestore REST API with a service-account OAuth token; its service-account JSON must be set as the `FIREBASE_SERVICE_ACCOUNT_JSON` Cloudflare Worker secret. Never commit that JSON or its private key. The account needs the `roles/datastore.user` IAM role in the Firebase project. The project ID is configured as the non-secret `FIREBASE_PROJECT_ID` Wrangler variable.

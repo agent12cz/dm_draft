@@ -48,7 +48,8 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [isParticipantAssigned, setIsParticipantAssigned] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const followLatestRef = useRef(true);
 
   const isAdmin = currentUserRole === "admin";
   const isAuthorized = Boolean(currentUser && (isAdmin || isParticipantAssigned));
@@ -175,7 +176,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
           (snapshot) => {
             const nextMessages = snapshot.docs
               .map((document) => {
-                const data = document.data() as Partial<DraftMessage>;
+                const data = document.data({ serverTimestamps: "estimate" }) as Partial<DraftMessage>;
                 return {
                   id: document.id,
                   userId: data.userId ?? "",
@@ -188,10 +189,10 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
               .sort((left, right) => {
                 const leftTime = left.createdAt && typeof left.createdAt === "object" && "toDate" in left.createdAt && typeof left.createdAt.toDate === "function"
                   ? left.createdAt.toDate().getTime()
-                  : 0;
+                  : Number.MAX_SAFE_INTEGER;
                 const rightTime = right.createdAt && typeof right.createdAt === "object" && "toDate" in right.createdAt && typeof right.createdAt.toDate === "function"
                   ? right.createdAt.toDate().getTime()
-                  : 0;
+                  : Number.MAX_SAFE_INTEGER;
                 return leftTime - rightTime;
               });
 
@@ -223,7 +224,10 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
       return;
     }
 
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = messagesContainerRef.current;
+    if (container && followLatestRef.current) {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    }
   }, [messages]);
 
   async function handleSendMessage(event?: FormEvent) {
@@ -246,6 +250,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
 
     setIsSending(true);
     setChatError(null);
+    followLatestRef.current = true;
 
     try {
       const { db, firestoreApi } = await getFirebaseClient();
@@ -277,8 +282,18 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
   }
 
   const content = (
-    <div className={`flex flex-col ${isEmbedded ? "h-full" : "h-[420px] rounded-2xl border border-slate-800 bg-slate-950/70"} overflow-hidden`}>
-      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+    <div className={`flex min-h-0 min-w-0 flex-col ${isEmbedded ? "h-full max-h-[420px]" : "h-[420px] max-h-[65dvh] rounded-2xl border border-slate-800 bg-slate-950/70"} overflow-hidden`}>
+      <div
+        ref={messagesContainerRef}
+        role="log"
+        aria-label="Zprávy chatu"
+        aria-live="polite"
+        onScroll={(event) => {
+          const container = event.currentTarget;
+          followLatestRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 64;
+        }}
+        className="min-h-0 min-w-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-4"
+      >
         {isLoadingMessages ? (
           <div className="flex h-full items-center justify-center text-sm text-slate-400">
             Načítám zprávy...
@@ -289,14 +304,14 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
             return (
               <div key={message.id} className={`flex ${isOwnMessage ? "justify-end" : "justify-start"}`}>
                 <div
-                  className={`max-w-[85%] rounded-2xl border px-3.5 py-2.5 shadow-sm ${
+                  className={`min-w-0 max-w-[85%] rounded-2xl border px-3.5 py-2.5 shadow-sm ${
                     isOwnMessage
                       ? "border-[#18C964]/30 bg-[#18C964]/15 text-slate-100"
                       : "border-slate-800 bg-slate-900/90 text-slate-200"
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <p className={`text-xs font-semibold ${isOwnMessage ? "text-[#8ef0b5]" : "text-slate-300"}`}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className={`min-w-0 break-all text-xs font-semibold ${isOwnMessage ? "text-[#8ef0b5]" : "text-slate-300"}`}>
                       {message.displayName}
                     </p>
                     {message.role === "admin" ? (
@@ -305,7 +320,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
                       </span>
                     ) : null}
                   </div>
-                  <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-100">{message.text}</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-100">{message.text}</p>
                   <p className="mt-1.5 text-[10px] uppercase tracking-wider text-slate-400">
                     {formatMessageTime(message.createdAt)}
                   </p>
@@ -320,10 +335,9 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
             <p className="text-xs text-slate-500">Buďte první a napište zprávu ostatním účastníkům.</p>
           </div>
         )}
-        <div ref={messagesEndRef} />
       </div>
 
-      <form onSubmit={handleSendMessage} className="border-t border-slate-800/80 bg-slate-900/90 p-3">
+      <form onSubmit={handleSendMessage} className="shrink-0 border-t border-slate-800/80 bg-slate-900/90 p-3">
         <label className="grid gap-1.5 text-xs font-medium text-slate-300">
           <div className="flex items-center justify-between">
             <span>Napsat zprávu</span>
@@ -373,7 +387,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
   }
 
   return (
-    <div className={`rounded-[28px] border border-slate-800 bg-slate-900/90 p-4 shadow-2xl shadow-slate-950/60 sm:p-5 ${className}`}>
+    <div className={`min-w-0 rounded-[28px] border border-slate-800 bg-slate-900/90 p-4 shadow-2xl shadow-slate-950/60 sm:p-5 ${className}`}>
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">Chat draftu</p>

@@ -186,9 +186,9 @@ export default function PlayerDraftPage() {
   const [teamSearch, setTeamSearch] = useState("");
   const [mainTab, setMainTab] = useState<"teams" | "priorities" | "ranking">("teams");
   const [mobileTab, setMobileTab] = useState<
-    "teams" | "priorities" | "ranking" | "my-teams" | "participants" | "chat" | "history"
+    "teams" | "priorities" | "ranking" | "my-teams" | "participants" | "history"
   >("teams");
-  const [sidebarTab, setSidebarTab] = useState<"participants" | "chat" | "history">("participants");
+  const [sidebarTab, setSidebarTab] = useState<"participants" | "history">("participants");
 
   // Player priorities state
   const [myPrioritiesOrder, setMyPrioritiesOrder] = useState<string[]>([]);
@@ -1359,7 +1359,7 @@ export default function PlayerDraftPage() {
           ) : null}
 
           {/* Mobile Navigation Tabs */}
-          <div className="flex gap-2 overflow-x-auto rounded-2xl border border-slate-800 bg-slate-950/80 p-1.5 lg:hidden">
+          <div className="flex flex-wrap gap-2 rounded-2xl border border-slate-800 bg-slate-950/80 p-1.5 lg:hidden">
             <button
               type="button"
               onClick={() => {
@@ -1438,17 +1438,6 @@ export default function PlayerDraftPage() {
             </button>
             <button
               type="button"
-              onClick={() => setMobileTab("chat")}
-              className={`flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-bold transition ${
-                mobileTab === "chat"
-                  ? "bg-[#18C964] text-slate-950 shadow"
-                  : "text-slate-300 hover:bg-slate-900"
-              }`}
-            >
-              <span>💬 Chat</span>
-            </button>
-            <button
-              type="button"
               onClick={() => setMobileTab("history")}
               className={`flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-bold transition ${
                 mobileTab === "history"
@@ -1461,7 +1450,7 @@ export default function PlayerDraftPage() {
           </div>
 
           {/* Main Layout Grid */}
-          <div className="grid gap-6 lg:grid-cols-[1.5fr_1fr] xl:grid-cols-[1.8fr_1fr]">
+          <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] xl:grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)]">
             {/* Primary Column: Tabs (Týmy k výběru, Moje priority, Žebříček draftu) */}
             {(() => {
               const activePrimaryTab =
@@ -1469,7 +1458,7 @@ export default function PlayerDraftPage() {
 
               return (
                 <div
-                  className={`space-y-4 ${
+                  className={`min-w-0 space-y-4 ${
                     mobileTab !== "teams" && mobileTab !== "priorities" && mobileTab !== "ranking"
                       ? "hidden lg:block"
                       : ""
@@ -2025,8 +2014,14 @@ export default function PlayerDraftPage() {
               );
             })()}
 
-            {/* Secondary Column: "Moje týmy", Tabs (Účastníci, Chat, Historie) */}
-            <div className="space-y-6">
+            {/* Secondary Column */}
+            <div className="min-w-0 space-y-6">
+              <DraftChat
+                draftId={draft.id}
+                draftCode={draft.code}
+                currentUser={user}
+                currentUserRole={profile?.role ?? null}
+              />
               {/* "Moje týmy" Card - visible on desktop always, on mobile when active tab */}
               <div
                 className={`rounded-[32px] border border-slate-800/90 bg-slate-900/85 p-5 shadow-2xl backdrop-blur-md sm:p-6 ${
@@ -2079,10 +2074,10 @@ export default function PlayerDraftPage() {
                 )}
               </div>
 
-              {/* Sidebar Panel for Participants / Chat / History */}
+              {/* Sidebar Panel for Participants / History */}
               <div
                 className={`rounded-[32px] border border-slate-800/90 bg-slate-900/85 p-5 shadow-2xl backdrop-blur-md sm:p-6 ${
-                  mobileTab === "teams" || mobileTab === "my-teams" ? "hidden lg:block" : ""
+                  mobileTab !== "participants" && mobileTab !== "history" ? "hidden lg:block" : ""
                 }`}
               >
                 {/* Desktop Tabs Header (on mobile, tabs are chosen via mobile tab bar) */}
@@ -2100,17 +2095,6 @@ export default function PlayerDraftPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSidebarTab("chat")}
-                    className={`flex-1 rounded-xl py-2 text-center text-xs font-bold transition ${
-                      sidebarTab === "chat"
-                        ? "bg-[#18C964] text-slate-950 shadow"
-                        : "text-slate-400 hover:bg-slate-800 hover:text-white"
-                    }`}
-                  >
-                    Chat
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => setSidebarTab("history")}
                     className={`flex-1 rounded-xl py-2 text-center text-xs font-bold transition ${
                       sidebarTab === "history"
@@ -2123,8 +2107,9 @@ export default function PlayerDraftPage() {
                 </div>
 
                 {/* 1. PARTICIPANTS LIST */}
-                {(sidebarTab === "participants" || mobileTab === "participants") && (
-                  <div className="space-y-3 pt-2 lg:pt-4">
+                  <div className={`space-y-3 pt-2 lg:pt-4 ${
+                    mobileTab === "participants" ? "" : "hidden"
+                  } ${sidebarTab === "participants" ? "lg:block" : "lg:hidden"}`}>
                     <div className="flex items-center justify-between">
                       <h4 className="text-sm font-bold text-white">Přehled účastníků</h4>
                       <span className="text-[11px] text-slate-500">V pořadí podle rozpisu</span>
@@ -2193,24 +2178,11 @@ export default function PlayerDraftPage() {
                       })}
                     </div>
                   </div>
-                )}
 
-                {/* 2. CHAT */}
-                {(sidebarTab === "chat" || mobileTab === "chat") && (
-                  <div className="pt-2 lg:pt-4">
-                    <DraftChat
-                      draftId={draft.id}
-                      draftCode={draft.code}
-                      currentUser={user}
-                      currentUserRole={profile?.role ?? null}
-                      isEmbedded={true}
-                    />
-                  </div>
-                )}
-
-                {/* 3. HISTORY */}
-                {(sidebarTab === "history" || mobileTab === "history") && (
-                  <div className="space-y-3 pt-2 lg:pt-4">
+                {/* 2. HISTORY */}
+                  <div className={`space-y-3 pt-2 lg:pt-4 ${
+                    mobileTab === "history" ? "" : "hidden"
+                  } ${sidebarTab === "history" ? "lg:block" : "lg:hidden"}`}>
                     <div className="flex items-center justify-between">
                       <div>
                         <h4 className="text-sm font-bold text-white">Historie výběrů</h4>
@@ -2276,7 +2248,6 @@ export default function PlayerDraftPage() {
                       </div>
                     )}
                   </div>
-                )}
               </div>
             </div>
           </div>
