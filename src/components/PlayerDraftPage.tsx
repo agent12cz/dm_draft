@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import type { Timestamp } from "firebase/firestore";
+import type { DocumentSnapshot, Timestamp } from "firebase/firestore";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
@@ -10,6 +10,7 @@ import { getFirebaseClient } from "@/lib/firebase";
 import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import { getTimeLeftForTurn, getTurnKey, type TurnCountdown } from "@/lib/turnCountdown";
+import { startInstantAutoPick } from "@/lib/instantAutoPick";
 import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
 
@@ -198,7 +199,8 @@ export default function PlayerDraftPage() {
   const [dragOverPriorityIndex, setDragOverPriorityIndex] = useState<number | null>(null);
   const loadedDraftIdRef = useRef<string | null>(null);
   const lastTurnHandledRef = useRef<string | null>(null);
-  const autoPickRequestedTurnRef = useRef<string | null>(null);
+  const refreshDraftRef = useRef<((signal: AbortSignal) => Promise<void>) | null>(null);
+  const [autoPickFeedback, setAutoPickFeedback] = useState<{ turnKey: string; message: string } | null>(null);
   const hasInitializedTurnNotificationRef = useRef(false);
   const notificationPermissionRequestedRef = useRef(false);
   const turnStartedAtMs = draft?.turnStartedAt?.toDate
@@ -208,6 +210,8 @@ export default function PlayerDraftPage() {
     ? getTurnKey(draft.id, draft.currentPickIndex, turnStartedAtMs)
     : null;
   const timeLeft = getTimeLeftForTurn(turnCountdown, currentTurnKey);
+  const draftStatus = draft?.status;
+  const turnDurationSeconds = draft?.turnDurationSeconds;
 
   useEffect(() => {
     if (!code) {
@@ -225,53 +229,83 @@ export default function PlayerDraftPage() {
         }
 
         const draftRef = firestoreApi.doc(db, "drafts", code);
-        unsubscribe = firestoreApi.onSnapshot(
-          draftRef,
-          (snapshot) => {
-            if (snapshot.exists()) {
-              const data = snapshot.data();
-              const turnStartedAtValue = data.turnStartedAt;
-              const hasToDate = typeof turnStartedAtValue === "object"
-                && turnStartedAtValue !== null
-                && "toDate" in turnStartedAtValue
-                && typeof (turnStartedAtValue as { toDate?: unknown }).toDate === "function";
-
-              setDraft({
-                id: snapshot.id,
-                title: data.title ?? "Bez názvu",
-                sport: data.sport ?? "NHL",
-                code: data.code ?? code,
-                status: data.status ?? "waiting",
-                productName: data.productName ?? "",
-                productSeason: data.productSeason ?? "",
-                productPrice: Number(data.productPrice ?? 0),
-                productImageUrl: data.productImageUrl ?? "",
-                boxCount: Number(data.boxCount ?? 0),
-                boxPrice: Number(data.boxPrice ?? 0),
-                margin: Number(data.margin ?? 0),
-                targetBreakPrice: Number(data.targetBreakPrice ?? 0),
-                participantCount: Number(data.participantCount ?? 0),
-                participants: (data.participants ?? []) as DraftParticipant[],
-                currentPickIndex: Number(data.currentPickIndex ?? 0),
-                pickOrder: (data.pickOrder ?? []) as number[],
-                draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
-                availableItemIds: (data.availableItemIds ?? []) as string[],
-                history: (data.history ?? []) as DraftHistoryItem[],
-                turnDurationSeconds: data.turnDurationSeconds === null ? null : Number(data.turnDurationSeconds ?? 15),
-                turnStartedAt: hasToDate ? (turnStartedAtValue as Timestamp) : null,
-                boxes: (data.boxes ?? []) as DraftBox[],
-                teamRanking: Array.isArray(data.teamRanking) ? (data.teamRanking as string[]) : undefined,
-                teamRankingLocked: Boolean(data.teamRankingLocked || (data.status && data.status !== "waiting")),
-                playerPriorities: (data.playerPriorities ?? {}) as Record<string, string[]>,
+        let lastObservedTurn: string | null = null;
+        let snapshotRevision = 0;
+        const handleSnapshot = (snapshot: DocumentSnapshot, source = "listener") => {
+          if (!isMounted) return;
+          snapshotRevision += 1;
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+            const turnStartedAtValue = data.turnStartedAt;
+            const hasToDate = typeof turnStartedAtValue === "object"
+              && turnStartedAtValue !== null
+              && "toDate" in turnStartedAtValue
+              && typeof (turnStartedAtValue as { toDate?: unknown }).toDate === "function";
+            const observedTurn = getTurnKey(
+              snapshot.id,
+              Number(data.currentPickIndex ?? 0),
+              hasToDate ? (turnStartedAtValue as Timestamp).toDate().getTime() : null,
+            );
+            if (observedTurn !== lastObservedTurn || source === "recovery") {
+              console.info("[autopick]", {
+                event: "snapshot-observed",
+                source,
+                turnKey: observedTurn,
+                previousTurnKey: lastObservedTurn,
+                status: data.status,
+                fromCache: snapshot.metadata.fromCache,
+                hasPendingWrites: snapshot.metadata.hasPendingWrites,
               });
-            } else {
-              setDraft(null);
+              lastObservedTurn = observedTurn;
             }
 
-            setIsLoading(false);
-          },
+            setDraft({
+              id: snapshot.id,
+              title: data.title ?? "Bez názvu",
+              sport: data.sport ?? "NHL",
+              code: data.code ?? code,
+              status: data.status ?? "waiting",
+              productName: data.productName ?? "",
+              productSeason: data.productSeason ?? "",
+              productPrice: Number(data.productPrice ?? 0),
+              productImageUrl: data.productImageUrl ?? "",
+              boxCount: Number(data.boxCount ?? 0),
+              boxPrice: Number(data.boxPrice ?? 0),
+              margin: Number(data.margin ?? 0),
+              targetBreakPrice: Number(data.targetBreakPrice ?? 0),
+              participantCount: Number(data.participantCount ?? 0),
+              participants: (data.participants ?? []) as DraftParticipant[],
+              currentPickIndex: Number(data.currentPickIndex ?? 0),
+              pickOrder: (data.pickOrder ?? []) as number[],
+              draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+              availableItemIds: (data.availableItemIds ?? []) as string[],
+              history: (data.history ?? []) as DraftHistoryItem[],
+              turnDurationSeconds: data.turnDurationSeconds === null ? null : Number(data.turnDurationSeconds ?? 15),
+              turnStartedAt: hasToDate ? (turnStartedAtValue as Timestamp) : null,
+              boxes: (data.boxes ?? []) as DraftBox[],
+              teamRanking: Array.isArray(data.teamRanking) ? (data.teamRanking as string[]) : undefined,
+              teamRankingLocked: Boolean(data.teamRankingLocked || (data.status && data.status !== "waiting")),
+              playerPriorities: (data.playerPriorities ?? {}) as Record<string, string[]>,
+            });
+          } else {
+            setDraft(null);
+          }
+
+          setIsLoading(false);
+        };
+        refreshDraftRef.current = async (signal) => {
+          const revisionBeforeRead = snapshotRevision;
+          const snapshot = await firestoreApi.getDocFromServer(draftRef);
+          if (!signal.aborted && snapshotRevision === revisionBeforeRead) {
+            handleSnapshot(snapshot, "recovery");
+          }
+        };
+        unsubscribe = firestoreApi.onSnapshot(
+          draftRef,
+          handleSnapshot,
           (loadError) => {
             console.error(loadError);
+            console.error("[autopick]", { event: "snapshot-listener-failed" });
             setError("Nepodařilo se načíst draft z Firestore.");
             setIsLoading(false);
           },
@@ -285,12 +319,14 @@ export default function PlayerDraftPage() {
 
     return () => {
       isMounted = false;
+      refreshDraftRef.current = null;
       unsubscribe?.();
     };
   }, [code]);
 
   useEffect(() => {
-    if (!draft || draft.status !== "drafting" || draft.turnDurationSeconds === null) {
+    if (draftStatus !== "drafting" || turnDurationSeconds === null
+      || turnDurationSeconds === undefined) {
       return;
     }
 
@@ -300,7 +336,13 @@ export default function PlayerDraftPage() {
       return;
     }
 
-    const totalSeconds = draft.turnDurationSeconds;
+    const totalSeconds = turnDurationSeconds;
+    console.info("[autopick]", {
+      event: "countdown-started",
+      turnKey,
+      durationSeconds: totalSeconds,
+      turnStartedAtMs: startedAt,
+    });
     const updateCountdown = () => {
       if (startedAt === null) {
         setTurnCountdown({ turnKey, seconds: totalSeconds });
@@ -318,7 +360,7 @@ export default function PlayerDraftPage() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [currentTurnKey, draft, turnStartedAtMs]);
+  }, [currentTurnKey, draftStatus, turnDurationSeconds, turnStartedAtMs]);
 
   const closeHistoryDialog = useCallback(() => {
     setIsHistoryDialogOpen(false);
@@ -524,44 +566,26 @@ export default function PlayerDraftPage() {
       !isTurnExpired,
   );
 
-  // Po vypršení času požádá server o okamžitý automatický výběr.
-  // O samotném výběru rozhoduje výhradně server, Cron zůstává záložním řešením.
+  const autoPickDraftId = draft?.id;
+  const autoPickIndex = draft?.currentPickIndex;
   useEffect(() => {
-    if (!draft || !user || !isTurnExpired || isCompleted) {
+    if (!autoPickDraftId || autoPickIndex === undefined || !currentTurnKey
+      || !user || !isTurnExpired || isCompleted) {
       return;
     }
 
-    const turnKey = currentTurnKey;
-    if (!turnKey) {
-      return;
-    }
-
-    if (autoPickRequestedTurnRef.current === turnKey) {
-      return;
-    }
-
-    autoPickRequestedTurnRef.current = turnKey;
-
-    void (async () => {
-      try {
-        const idToken = await user.getIdToken();
-        await fetch("/api/draft/auto-pick", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({
-            draftId: draft.id,
-            currentPickIndex: draft.currentPickIndex,
-          }),
-        });
-      } catch (autoPickError) {
-        // Výběr dokončí záložní Cloudflare Cron, uživateli nehlásíme falešný stav.
-        console.error(autoPickError);
-      }
-    })();
-  }, [currentTurnKey, draft, isCompleted, isTurnExpired, user]);
+    return startInstantAutoPick({
+      draftId: autoPickDraftId,
+      currentPickIndex: autoPickIndex,
+      turnKey: currentTurnKey,
+      getIdToken: (forceRefresh) => user.getIdToken(forceRefresh),
+      refreshDraft: async (signal) => {
+        if (!refreshDraftRef.current) throw new Error("Draft listener is not ready.");
+        await refreshDraftRef.current(signal);
+      },
+      onMessage: (message) => setAutoPickFeedback({ turnKey: currentTurnKey, message }),
+    });
+  }, [autoPickDraftId, autoPickIndex, currentTurnKey, isCompleted, isTurnExpired, user]);
 
   const filteredAvailableItems = useMemo(() => {
     const query = teamSearch.trim().toLowerCase();
@@ -1275,7 +1299,9 @@ export default function PlayerDraftPage() {
 
                   {isTurnExpired ? (
                     <div className="mt-3 rounded-xl border border-red-500/40 bg-red-500/15 px-3 py-2 text-center text-xs font-bold text-red-300">
-                      ⏰ Čas vypršel – probíhá automatický výběr…
+                      ⏰ {autoPickFeedback?.turnKey === currentTurnKey
+                        ? autoPickFeedback.message
+                        : "Čas vypršel – probíhá automatický výběr…"}
                     </div>
                   ) : null}
                 </div>

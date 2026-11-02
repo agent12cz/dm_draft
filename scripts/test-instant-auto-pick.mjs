@@ -224,6 +224,50 @@ function createFirestoreMock(initialDraft) {
 console.log("Running instant automatic pick tests...");
 
 {
+  const teams = Array.from({ length: 10 }, (_, index) => ({
+    id: `team-${index}`,
+    name: `Team ${index}`,
+  }));
+  const mock = createFirestoreMock(expiredDraftFixture({
+    turnDurationSeconds: 15,
+    pickOrder: teams.map((_, index) => index % 2),
+    availableItemIds: teams.map((team) => team.id),
+    draftItems: teams,
+    teamRanking: teams.map((team) => team.id),
+  }));
+  for (let index = 0; index < 10; index += 1) {
+    mock.expireCurrentTurn();
+    const result = await runImmediateDraftPick(
+      workerEnv,
+      { draftId: "ABCDE", userId: "player-1", expectedPickIndex: index },
+      mock.fetchMock,
+    );
+    assert.equal(result.status, "picked");
+    assert.equal(result.completed, index === 9);
+    assert.equal(mock.getDraft().currentPickIndex, index + 1);
+    if (index < 9) {
+      assert.equal(Number.isFinite(Date.parse(mock.getDraft().turnStartedAt)), true);
+      assert.equal(mock.getCommits()[index].updateTransforms.some(
+        (transform) => transform.fieldPath === "turnStartedAt"
+          && transform.setToServerValue === "REQUEST_TIME",
+      ), true);
+      const tooEarly = await runImmediateDraftPick(
+        workerEnv,
+        { draftId: "ABCDE", userId: "player-1", expectedPickIndex: index + 1 },
+        mock.fetchMock,
+      );
+      assert.equal(tooEarly.status, "not-expired");
+    }
+  }
+  assert.equal(mock.getDraft().status, "completed");
+  assert.equal(mock.getDraft().turnStartedAt, undefined);
+  assert.equal(mock.getDraft().history.length, 10);
+  assert.equal(new Set(mock.getDraft().history.map((entry) => entry.itemId)).size, 10);
+  assert.equal(mock.getCommits().length, 10);
+  console.log("✓ Ten consecutive 15-second server autopicks reset the timestamp and complete exactly once");
+}
+
+{
   const mock = createFirestoreMock(expiredDraftFixture());
   const result = await runImmediateDraftPick(
     workerEnv,
