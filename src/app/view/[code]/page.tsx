@@ -89,7 +89,7 @@ export default function ViewerPage() {
           return;
         }
 
-        const draftRef = firestoreApi.doc(db, "drafts", code);
+        const draftRef = firestoreApi.doc(db, "publicDrafts", code);
         unsubscribe = firestoreApi.onSnapshot(
           draftRef,
           (snapshot) => {

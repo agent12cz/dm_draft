@@ -6,6 +6,7 @@ import {
   type AutoPickParticipant,
   type AutoPickUpdate,
 } from "../src/lib/autoPick";
+import { extendSnakeOrderForSkippedPick } from "../src/lib/snakeDraft";
 
 export type DraftWorkerEnv = {
   FIREBASE_PROJECT_ID: string;
@@ -38,6 +39,7 @@ type FirestoreValue = Record<string, unknown>;
 type FirestoreDocument = {
   name?: string;
   fields?: Record<string, unknown>;
+  updateTime?: string;
 };
 type GoogleAccessToken = {
   access_token: string;
@@ -335,7 +337,12 @@ function decodeDraft(fields: Record<string, unknown>): AutoPickDraft | null {
   };
 }
 
-function participantUserIds(fields: Record<string, unknown>) {
+function participantUserIds(fields: Record<string, unknown>, privateFields?: DraftPrivateFields) {
+  if (privateFields?.participants) {
+    return privateFields.participants.flatMap((participant) =>
+      typeof participant.userId === "string" ? [participant.userId] : [],
+    );
+  }
   return Array.isArray(fields.participants)
     ? fields.participants.flatMap((participant) =>
         isRecord(participant) && typeof participant.userId === "string" ? [participant.userId] : [],
@@ -343,8 +350,16 @@ function participantUserIds(fields: Record<string, unknown>) {
     : [];
 }
 
-function canRequestImmediatePick(fields: Record<string, unknown>, userId: string) {
-  return fields.ownerUserId === userId || participantUserIds(fields).includes(userId);
+function canRequestImmediatePick(
+  fields: Record<string, unknown>,
+  userId: string,
+  privateFields?: DraftPrivateFields,
+) {
+  return (
+    privateFields?.ownerUserId === userId ||
+    fields.ownerUserId === userId ||
+    participantUserIds(fields, privateFields).includes(userId)
+  );
 }
 
 function asDocument(value: unknown): FirestoreDocument | null {
@@ -403,7 +418,7 @@ async function listExpiredDrafts(
     },
     body: JSON.stringify({
       structuredQuery: {
-        from: [{ collectionId: "drafts" }],
+        from: [{ collectionId: "publicDrafts" }],
         where: {
           compositeFilter: {
             op: "AND",
@@ -554,7 +569,15 @@ async function processExpiredDraft(
       }
 
       const fields = decodeFirestoreFields(document.fields);
-      if (guard?.userId && !canRequestImmediatePick(fields, guard.userId)) {
+      const privateDocumentName = documentName.replace("/publicDrafts/", "/draftPrivate/");
+      const privateDocument = await getFirestoreDocument(
+        request,
+        accessToken,
+        privateDocumentName,
+        transaction,
+      );
+      const privateFields = privateFieldsForDraft(fields, privateDocument);
+      if (guard?.userId && !canRequestImmediatePick(fields, guard.userId, privateFields)) {
         return { status: "forbidden" };
       }
       if (fields.status !== "drafting") {
@@ -578,7 +601,10 @@ async function processExpiredDraft(
         return { status: "not-expired" };
       }
 
-      const draft = decodeDraft(fields);
+      const draft = decodeDraft({
+        ...fields,
+        playerPriorities: privateFields.playerPriorities ?? fields.playerPriorities,
+      });
       if (!draft) {
         return { status: "invalid" };
       }
@@ -675,7 +701,7 @@ export async function runImmediateDraftPick(
 
   const accessToken = await getAccessToken(env, request);
   const documentsBaseUrl = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(env.FIREBASE_PROJECT_ID)}/databases/(default)/documents`;
-  const documentName = `projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/drafts/${params.draftId}`;
+  const documentName = `projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/publicDrafts/${params.draftId}`;
 
   return processExpiredDraft(request, documentsBaseUrl, accessToken, documentName, {
     userId: params.userId,
@@ -729,4 +755,1784 @@ export async function runExpiredDraftPicks(
   }
 
   return { candidates: expiredDrafts.length, picked, completed, conflicts };
+}
+
+export class FirestoreSecurityError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+type DraftPrivateParticipant = {
+  userId?: string;
+  email?: string;
+  participantId?: string;
+  participantPin?: string | null;
+  joinedAt?: unknown;
+};
+
+type DraftPrivateFields = {
+  ownerUserId?: string | null;
+  participants?: DraftPrivateParticipant[];
+  playerPriorities?: Record<string, string[]>;
+};
+
+type DraftTransactionContext = {
+  accessToken: string;
+  baseUrl: string;
+  documentName: string;
+  privateDocumentName: string;
+  fields: Record<string, unknown>;
+  privateFields: DraftPrivateFields;
+};
+
+type DraftTransactionResult = {
+  writes?: unknown[];
+  result: Record<string, unknown>;
+};
+
+type FirestoreDocumentWrite = {
+  update: { name: string; fields: Record<string, FirestoreValue> };
+  updateMask: { fieldPaths: string[] };
+  updateTransforms?: Array<Record<string, unknown>>;
+  currentDocument?: { exists: boolean };
+};
+
+const PRIVATE_PARTICIPANT_FIELDS = [
+  "userId",
+  "uid",
+  "email",
+  "participantId",
+  "participantPin",
+  "joinedAt",
+] as const;
+const DRAFT_PUBLIC_UPDATE_FIELDS = new Set([
+  "title",
+  "sport",
+  "code",
+  "productId",
+  "productName",
+  "productSeason",
+  "productPrice",
+  "productImageUrl",
+  "boxCount",
+  "boxPrice",
+  "boxes",
+  "margin",
+  "targetBreakPrice",
+  "participantCount",
+  "participants",
+  "status",
+  "currentPickIndex",
+  "pickOrder",
+  "draftItems",
+  "availableItemIds",
+  "history",
+  "turnDurationSeconds",
+  "teamRanking",
+  "teamRankingLocked",
+  "participantOrderDrawn",
+]);
+function documentResource(projectId: string, collection: string, id: string) {
+  return `projects/${projectId}/databases/(default)/documents/${collection}/${id}`;
+}
+
+function firestoreDocumentsUrl(projectId: string) {
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}/databases/(default)/documents`;
+}
+
+async function getFirestoreDocument(
+  request: typeof fetch,
+  accessToken: string,
+  documentName: string,
+  transaction?: string,
+): Promise<FirestoreDocument | null> {
+  const query = transaction ? `?transaction=${encodeURIComponent(transaction)}` : "";
+  const response = await request(
+    `https://firestore.googleapis.com/v1/${encodedResourceName(documentName)}${query}`,
+    { headers: { authorization: `Bearer ${accessToken}` } },
+  );
+  if (response.status === 404) return null;
+  return readJsonResponse<FirestoreDocument>(response, "Firestore document read");
+}
+
+function plainValue(value: unknown): unknown {
+  if (
+    isRecord(value) &&
+    value.__firestoreTimestamp === true &&
+    typeof value.value === "string"
+  ) {
+    return value.value;
+  }
+  if (Array.isArray(value)) return value.map(plainValue);
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, plainValue(entry)]));
+  }
+  return value;
+}
+
+function privateFromLegacyFields(fields: Record<string, unknown>): DraftPrivateFields {
+  const participants = Array.isArray(fields.participants) ? fields.participants : [];
+  return {
+    ownerUserId: typeof fields.ownerUserId === "string" ? fields.ownerUserId : null,
+    participants: participants.map((participant) => {
+      if (!isRecord(participant)) return {};
+      return {
+        userId: typeof participant.userId === "string"
+          ? participant.userId
+          : typeof participant.uid === "string"
+            ? participant.uid
+            : "",
+        email: typeof participant.email === "string" ? participant.email : "",
+        participantId: typeof participant.participantId === "string" ? participant.participantId : "",
+        participantPin: typeof participant.participantPin === "string" ? participant.participantPin : null,
+        joinedAt: participant.joinedAt,
+      };
+    }),
+    playerPriorities: isRecord(fields.playerPriorities)
+      ? decodePriorities(fields.playerPriorities)
+      : {},
+  };
+}
+
+function privateFieldsForDraft(
+  documentFields: Record<string, unknown>,
+  privateDocument: FirestoreDocument | null,
+): DraftPrivateFields {
+  if (privateDocument && isRecord(privateDocument.fields)) {
+    const stored = decodeFirestoreFields(privateDocument.fields);
+    return {
+      ownerUserId: typeof stored.ownerUserId === "string" ? stored.ownerUserId : null,
+      participants: Array.isArray(stored.participants)
+        ? stored.participants.filter(isRecord) as DraftPrivateParticipant[]
+        : [],
+      playerPriorities: decodePriorities(stored.playerPriorities),
+    };
+  }
+  return privateFromLegacyFields(documentFields);
+}
+
+function stripPrivateParticipantFields(participant: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(participant).filter(([key]) =>
+      !(PRIVATE_PARTICIPANT_FIELDS as readonly string[]).includes(key),
+    ),
+  );
+}
+
+function visibleDraftParticipants(
+  fields: Record<string, unknown>,
+  privateFields: DraftPrivateFields,
+  userId: string,
+  role: "owner" | "admin" | "participant" | "none",
+) {
+  const publicParticipants = Array.isArray(fields.participants) ? fields.participants : [];
+  const privateParticipants = privateFields.participants ?? [];
+  return publicParticipants.map((participant, index) => {
+    const publicValue = isRecord(participant) ? participant : {};
+    const privateValue = privateParticipants[index] ?? {};
+    if (role === "owner" || role === "admin" || privateValue.userId === userId) {
+      return plainValue({
+        ...publicValue,
+        ...privateValue,
+        userId: privateValue.userId ?? "",
+        uid: privateValue.userId ?? "",
+        email: privateValue.email ?? "",
+        participantId: privateValue.participantId ?? "",
+        participantPin: privateValue.participantPin ?? null,
+        joinedAt: privateValue.joinedAt ?? null,
+      });
+    }
+    return plainValue(stripPrivateParticipantFields(publicValue));
+  });
+}
+
+function sameSecurityValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (left instanceof Date) return sameSecurityValue(left.toISOString(), right);
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => sameSecurityValue(item, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  if (
+    left.__firestoreTimestamp === true &&
+    typeof left.value === "string" &&
+    typeof right.seconds === "number"
+  ) {
+    const leftMillis = Date.parse(left.value);
+    const rightMillis = right.seconds * 1000 + Number(right.nanoseconds ?? 0) / 1_000_000;
+    return leftMillis === rightMillis;
+  }
+  if (
+    right.__firestoreTimestamp === true &&
+    typeof right.value === "string" &&
+    typeof left.seconds === "number"
+  ) {
+    return sameSecurityValue(right, left);
+  }
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return sameSecurityValue(leftKeys, rightKeys) &&
+    leftKeys.every((key) => sameSecurityValue(left[key], right[key]));
+}
+
+function requireRecord(value: unknown, message = "Invalid request.") {
+  if (!isRecord(value)) throw new FirestoreSecurityError(400, message);
+  return value;
+}
+
+function requireString(value: unknown, field: string, maxLength = 256) {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) {
+    throw new FirestoreSecurityError(400, `Invalid ${field}.`);
+  }
+  return value;
+}
+
+async function getUserProfile(
+  request: typeof fetch,
+  accessToken: string,
+  projectId: string,
+  uid: string,
+) {
+  const document = await getFirestoreDocument(
+    request,
+    accessToken,
+    documentResource(projectId, "users", uid),
+  );
+  return document?.fields ? decodeFirestoreFields(document.fields) : null;
+}
+
+function isAdminProfile(profile: Record<string, unknown> | null) {
+  return profile?.role === "admin";
+}
+
+async function getDraftTransactionContext(
+  request: typeof fetch,
+  projectId: string,
+  accessToken: string,
+  draftId: string,
+  transaction: string,
+): Promise<DraftTransactionContext | null> {
+  const documentName = documentResource(projectId, "publicDrafts", draftId);
+  const privateDocumentName = documentResource(projectId, "draftPrivate", draftId);
+  const [document, privateDocument] = await Promise.all([
+    getFirestoreDocument(request, accessToken, documentName, transaction),
+    getFirestoreDocument(request, accessToken, privateDocumentName, transaction),
+  ]);
+  if (!document?.fields || !isRecord(document.fields)) return null;
+  const fields = decodeFirestoreFields(document.fields);
+  return {
+    accessToken,
+    baseUrl: firestoreDocumentsUrl(projectId),
+    documentName,
+    privateDocumentName,
+    fields,
+    privateFields: privateFieldsForDraft(fields, privateDocument),
+  };
+}
+
+async function runDraftTransaction(
+  request: typeof fetch,
+  projectId: string,
+  accessToken: string,
+  draftId: string,
+  operation: (context: DraftTransactionContext) => Promise<DraftTransactionResult>,
+) {
+  const baseUrl = firestoreDocumentsUrl(projectId);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const started = await postJson<{ transaction?: string }>(
+      request,
+      `${baseUrl}:beginTransaction`,
+      accessToken,
+      { options: { readWrite: {} } },
+      "Firestore begin transaction",
+    );
+    if (!started.transaction) throw new Error("Firestore did not return a transaction ID.");
+    const transaction = started.transaction;
+    let committed = false;
+    let aborted = false;
+    try {
+      const context = await getDraftTransactionContext(
+        request,
+        projectId,
+        accessToken,
+        draftId,
+        transaction,
+      );
+      if (!context) throw new FirestoreSecurityError(404, "Draft not found.");
+      const outcome = await operation(context);
+      if (!outcome.writes?.length) {
+        return outcome.result;
+      }
+
+      const response = await request(`${baseUrl}:commit`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ transaction, writes: outcome.writes }),
+      });
+      if (response.status === 409) {
+        aborted = true;
+        continue;
+      }
+      await readJsonResponse(response, "Firestore secure operation commit");
+      committed = true;
+      return outcome.result;
+    } finally {
+      if (!committed && !aborted) {
+        await rollbackTransaction(request, baseUrl, accessToken, transaction);
+      }
+    }
+  }
+  throw new FirestoreSecurityError(409, "The draft changed during the operation.");
+}
+
+function documentUpdateWrite(
+  name: string,
+  fields: Record<string, unknown>,
+  fieldPaths = Object.keys(fields),
+  transforms: Array<Record<string, unknown>> = [],
+): FirestoreDocumentWrite {
+  return {
+    update: {
+      name,
+      fields: Object.fromEntries(
+        Object.entries(fields).map(([key, value]) => [key, encodeFirestoreValue(value)]),
+      ),
+    },
+    updateMask: { fieldPaths },
+    ...(transforms.length ? { updateTransforms: transforms } : {}),
+  };
+}
+
+function serverTimestampTransform(fieldPath: string) {
+  return { fieldPath, setToServerValue: "REQUEST_TIME" };
+}
+
+function participantParts(
+  incoming: unknown,
+  previous: DraftPrivateParticipant[] = [],
+) {
+  if (!Array.isArray(incoming) || incoming.length > 100) {
+    throw new FirestoreSecurityError(400, "Invalid participant list.");
+  }
+
+  const publicParticipants: Record<string, unknown>[] = [];
+  const privateParticipants: DraftPrivateParticipant[] = [];
+  for (let index = 0; index < incoming.length; index += 1) {
+    const participant = requireRecord(incoming[index], "Invalid participant.");
+    const oldPrivate = previous[index] ?? {};
+    const userIdValue = participant.userId ?? participant.uid ?? oldPrivate.userId ?? "";
+    if (typeof userIdValue !== "string" || userIdValue.length > 128) {
+      throw new FirestoreSecurityError(400, "Invalid participant user ID.");
+    }
+
+    const userId = userIdValue.trim();
+    const privateParticipant: DraftPrivateParticipant = {
+      userId,
+      email: typeof participant.email === "string" ? participant.email : oldPrivate.email ?? "",
+      participantId: typeof participant.participantId === "string"
+        ? participant.participantId
+        : oldPrivate.participantId ?? "",
+      participantPin: typeof participant.participantPin === "string"
+        ? participant.participantPin
+        : oldPrivate.participantPin ?? null,
+      joinedAt: participant.joinedAt ?? oldPrivate.joinedAt ?? null,
+    };
+    publicParticipants.push(stripPrivateParticipantFields(participant));
+    privateParticipants.push(privateParticipant);
+  }
+  return { publicParticipants, privateParticipants };
+}
+
+async function resolveParticipantEmails(
+  request: typeof fetch,
+  accessToken: string,
+  projectId: string,
+  incoming: DraftPrivateParticipant[],
+  previous: DraftPrivateParticipant[],
+) {
+  const resolved: DraftPrivateParticipant[] = [];
+  for (let index = 0; index < incoming.length; index += 1) {
+    const participant = incoming[index];
+    const userId = participant.userId?.trim() ?? "";
+    if (!userId) {
+      resolved.push({ ...participant, email: "", joinedAt: participant.joinedAt ?? null });
+      continue;
+    }
+    const oldUserId = previous[index]?.userId?.trim() ?? "";
+    const profile = await getUserProfile(request, accessToken, projectId, userId);
+    if (userId !== oldUserId && !profile) {
+      throw new FirestoreSecurityError(400, "Participant must be an existing user.");
+    }
+    resolved.push({
+      ...participant,
+      email: typeof profile?.email === "string" ? profile.email : participant.email ?? "",
+    });
+  }
+  return resolved;
+}
+
+function ownerOrAdmin(
+  context: DraftTransactionContext,
+  actorId: string,
+  isGlobalAdmin: boolean,
+) {
+  const ownerId = context.privateFields.ownerUserId;
+  if (ownerId === actorId) return "owner";
+  if (isGlobalAdmin) return "admin";
+  return null;
+}
+
+function participantIndexForUser(context: DraftTransactionContext, actorId: string) {
+  const privateParticipants = context.privateFields.participants ?? [];
+  return privateParticipants.findIndex((participant) => participant.userId === actorId);
+}
+
+function draftPrivateWrite(
+  context: DraftTransactionContext,
+  privateFields: DraftPrivateFields,
+) {
+  return documentUpdateWrite(
+    context.privateDocumentName,
+    {
+      ownerUserId: privateFields.ownerUserId ?? null,
+      participants: privateFields.participants ?? [],
+      playerPriorities: privateFields.playerPriorities ?? {},
+    },
+    ["ownerUserId", "participants", "playerPriorities"],
+  );
+}
+
+function validateExpectedDraftState(
+  context: DraftTransactionContext,
+  expected: unknown,
+) {
+  if (expected === undefined) return;
+  const expectedFields = requireRecord(expected, "Invalid expected draft state.");
+  const current: Record<string, unknown> = {
+    ...context.fields,
+    participants: visibleDraftParticipants(
+      context.fields,
+      context.privateFields,
+      "",
+      "owner",
+    ),
+  };
+  if (current.teamRanking === undefined) current.teamRanking = [];
+  if (current.participantOrderDrawn === undefined) current.participantOrderDrawn = false;
+  for (const [field, value] of Object.entries(expectedFields)) {
+    if (!DRAFT_PUBLIC_UPDATE_FIELDS.has(field) || !sameSecurityValue(current[field], value)) {
+      throw new FirestoreSecurityError(409, "The draft changed during the operation.");
+    }
+  }
+}
+
+async function createDraft(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    if (!DRAFT_ID_PATTERN.test(draftId)) throw new FirestoreSecurityError(400, "Invalid draft ID.");
+    const source = requireRecord(body.data, "Invalid draft data.");
+    const profile = await getUserProfile(request, accessToken, projectId, actorId);
+    if (!profile) throw new FirestoreSecurityError(403, "A user profile is required.");
+
+    const participants = Array.isArray(source.participants) ? source.participants : [];
+    const { publicParticipants, privateParticipants } = participantParts(participants);
+    const resolvedPrivateParticipants = await resolveParticipantEmails(
+      request,
+      accessToken,
+      projectId,
+      privateParticipants,
+      [],
+    );
+    const publicFields = Object.fromEntries(
+      Object.entries(source).filter(([key]) =>
+        key !== "ownerUserId" &&
+        key !== "playerPriorities" &&
+        key !== "createdAt" &&
+        key !== "updatedAt" &&
+        key !== "participants",
+      ),
+    );
+    Object.assign(publicFields, {
+      code: draftId,
+      participants: publicParticipants,
+      privacyVersion: 1,
+    });
+    const privateFields: DraftPrivateFields = {
+      ownerUserId: actorId,
+      participants: resolvedPrivateParticipants,
+      playerPriorities: {},
+    };
+    const baseUrl = firestoreDocumentsUrl(projectId);
+    const publicName = documentResource(projectId, "publicDrafts", draftId);
+    const privateName = documentResource(projectId, "draftPrivate", draftId);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const started = await postJson<{ transaction?: string }>(
+        request,
+        `${baseUrl}:beginTransaction`,
+        accessToken,
+        { options: { readWrite: {} } },
+        "Firestore begin transaction",
+      );
+      if (!started.transaction) throw new Error("Firestore did not return a transaction ID.");
+      const transaction = started.transaction;
+      let committed = false;
+      let aborted = false;
+      try {
+        const [existingPublic, existingPrivate] = await Promise.all([
+          getFirestoreDocument(request, accessToken, publicName, transaction),
+          getFirestoreDocument(request, accessToken, privateName, transaction),
+        ]);
+        if (existingPublic || existingPrivate) {
+          throw new FirestoreSecurityError(409, "Draft ID is already in use.");
+        }
+
+        const writes = [
+          {
+            ...documentUpdateWrite(
+              publicName,
+              publicFields,
+              Object.keys(publicFields).concat(["createdAt", "updatedAt"]),
+              [serverTimestampTransform("createdAt"), serverTimestampTransform("updatedAt")],
+            ),
+            currentDocument: { exists: false },
+          },
+          {
+            ...documentUpdateWrite(
+              privateName,
+              privateFields as unknown as Record<string, unknown>,
+              ["ownerUserId", "participants", "playerPriorities"],
+            ),
+            currentDocument: { exists: false },
+          },
+        ];
+        const response = await request(`${baseUrl}:commit`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${accessToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ transaction, writes }),
+        });
+        if (response.status === 409) {
+          aborted = true;
+          continue;
+        }
+        await readJsonResponse(response, "Firestore draft creation");
+        committed = true;
+        return { draftId };
+      } finally {
+        if (!committed && !aborted) {
+          await rollbackTransaction(request, baseUrl, accessToken, transaction);
+        }
+      }
+    }
+    throw new FirestoreSecurityError(409, "Could not reserve a unique draft ID.");
+  }
+
+  async function loadDraftForAccess(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    draftId: string,
+  ) {
+    const [document, privateDocument] = await Promise.all([
+      getFirestoreDocument(request, accessToken, documentResource(projectId, "publicDrafts", draftId)),
+      getFirestoreDocument(request, accessToken, documentResource(projectId, "draftPrivate", draftId)),
+    ]);
+    if (!document?.fields || !isRecord(document.fields)) {
+      throw new FirestoreSecurityError(404, "Draft not found.");
+    }
+    const fields = decodeFirestoreFields(document.fields);
+    return { fields, privateFields: privateFieldsForDraft(fields, privateDocument) };
+  }
+
+  async function getDraftAccess(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    draftId: string,
+  ) {
+    const [{ fields, privateFields }, profile] = await Promise.all([
+      loadDraftForAccess(request, projectId, accessToken, draftId),
+      getUserProfile(request, accessToken, projectId, actorId),
+    ]);
+    const admin = isAdminProfile(profile);
+    const ownerId = privateFields.ownerUserId;
+    const index = participantIndexForUser(
+      { fields, privateFields } as DraftTransactionContext,
+      actorId,
+    );
+    const role = ownerId === actorId
+      ? "owner"
+      : admin
+        ? "admin"
+        : index >= 0
+          ? "participant"
+          : "none";
+    return {
+      role,
+      authorized: role !== "none",
+      participantIndex: index >= 0 ? index : null,
+      participants: visibleDraftParticipants(fields, privateFields, actorId, role),
+      playerPriorities: index >= 0
+        ? privateFields.playerPriorities?.[actorId] ?? []
+        : [],
+    };
+  }
+
+  async function joinDraft(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actor: { uid: string; email?: string },
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    const profile = await getUserProfile(request, accessToken, projectId, actor.uid);
+    if (!profile) throw new FirestoreSecurityError(403, "A user profile is required.");
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      const alreadyAssigned = participantIndexForUser(context, actor.uid);
+      if (alreadyAssigned >= 0) return { result: { status: "joined" } };
+      if (context.fields.status !== "waiting") {
+        throw new FirestoreSecurityError(409, "This draft is no longer accepting participants.");
+      }
+
+      const displayName = typeof profile.displayName === "string" ? profile.displayName.trim() : "";
+      if (!displayName) throw new FirestoreSecurityError(400, "The account has no display name.");
+      const participants = Array.isArray(context.fields.participants)
+        ? context.fields.participants.filter(isRecord)
+        : [];
+      const privateParticipants = context.privateFields.participants ?? [];
+      const slotIndex = participants.findIndex((participant, index) =>
+        (participant.status ?? "waiting") !== "ready" &&
+        !(privateParticipants[index]?.userId ?? "") &&
+        String(participant.displayName ?? participant.name ?? "").trim().toLowerCase() === displayName.toLowerCase(),
+      );
+      if (slotIndex < 0) {
+        throw new FirestoreSecurityError(403, "No available participant slot matches this account.");
+      }
+
+      const nextParticipants = participants.map((participant, index) =>
+        index === slotIndex
+          ? {
+              ...participant,
+              name: String(participant.name ?? displayName),
+              displayName: String(participant.displayName ?? participant.name ?? displayName),
+              status: "ready",
+            }
+          : participant,
+      );
+      const nextPrivateParticipants = [...privateParticipants];
+      nextPrivateParticipants[slotIndex] = {
+        ...nextPrivateParticipants[slotIndex],
+        userId: actor.uid,
+        email: actor.email ?? "",
+        joinedAt: new Date().toISOString(),
+      };
+      return {
+        writes: [
+          documentUpdateWrite(
+            context.documentName,
+            { participants: nextParticipants, privacyVersion: 1 },
+            ["participants", "privacyVersion", "updatedAt"],
+            [serverTimestampTransform("updatedAt")],
+          ),
+          draftPrivateWrite(context, {
+            ...context.privateFields,
+            participants: nextPrivateParticipants,
+          }),
+        ],
+        result: { status: "joined", participantIndex: slotIndex },
+      };
+    });
+  }
+
+  async function updateDraft(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    if (!DRAFT_ID_PATTERN.test(draftId)) throw new FirestoreSecurityError(400, "Invalid draft ID.");
+    const updates = requireRecord(body.updates, "Invalid draft update.");
+
+    for (const key of Object.keys(updates)) {
+      if (!DRAFT_PUBLIC_UPDATE_FIELDS.has(key) || key === "participantOrderDrawn") {
+        throw new FirestoreSecurityError(400, `Draft field cannot be changed: ${key}.`);
+      }
+    }
+
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (!ownerOrAdmin(context, actorId, isGlobalAdmin)) {
+        throw new FirestoreSecurityError(403, "Only the owner or a global administrator may edit this draft.");
+      }
+      validateExpectedDraftState(context, body.expected);
+
+      const options = isRecord(body.options) ? body.options : {};
+      const currentStatus = typeof context.fields.status === "string" ? context.fields.status : "waiting";
+      if (options.waiting === true && currentStatus !== "waiting") {
+        throw new FirestoreSecurityError(409, "This operation is only allowed before the draft starts.");
+      }
+      if (options.checkTurn === true) {
+        for (const field of ["currentPickIndex", "availableItemIds", "history", "pickOrder"]) {
+          const expected = isRecord(body.expected) ? body.expected[field] : undefined;
+          if (expected !== undefined && !sameSecurityValue(context.fields[field] ?? (field === "currentPickIndex" ? 0 : []), expected)) {
+            throw new FirestoreSecurityError(409, "The current draft turn has changed.");
+          }
+        }
+      }
+      if (options.reorder === true) {
+        if (currentStatus !== "waiting" || context.fields.participantOrderDrawn === true) {
+          throw new FirestoreSecurityError(409, "Participant order is locked.");
+        }
+      }
+      if (
+        updates.status === "drafting" &&
+        currentStatus !== "paused"
+      ) {
+        throw new FirestoreSecurityError(409, "Use the start operation to begin a draft.");
+      }
+      if (
+        updates.status !== undefined &&
+        !["waiting", "drafting", "paused", "completed"].includes(String(updates.status))
+      ) {
+        throw new FirestoreSecurityError(400, "Invalid draft status.");
+      }
+      if (
+        updates.turnDurationSeconds !== undefined &&
+        updates.turnDurationSeconds !== null &&
+        (!Number.isInteger(updates.turnDurationSeconds) ||
+          Number(updates.turnDurationSeconds) < 5 ||
+          Number(updates.turnDurationSeconds) > 300)
+      ) {
+        throw new FirestoreSecurityError(400, "Invalid turn duration.");
+      }
+
+      const publicUpdates: Record<string, unknown> = { ...updates };
+      const writes: unknown[] = [];
+      if (updates.participants !== undefined) {
+        const { publicParticipants, privateParticipants } = participantParts(
+          updates.participants,
+          context.privateFields.participants,
+        );
+        if (publicParticipants.length !== Number(context.fields.participantCount ?? publicParticipants.length)) {
+          throw new FirestoreSecurityError(400, "Participant count does not match the draft.");
+        }
+        const idsChanged = privateParticipants.some(
+          (participant, index) =>
+            participant.userId !== (context.privateFields.participants?.[index]?.userId ?? ""),
+        );
+        if (idsChanged && currentStatus !== "waiting") {
+          throw new FirestoreSecurityError(409, "Participant assignments are locked.");
+        }
+        if (options.reorder === true) {
+          const oldIds = (Array.isArray(context.fields.participants) ? context.fields.participants : [])
+            .map((participant) => isRecord(participant) ? participant.id : undefined);
+          const newIds = publicParticipants.map((participant) => participant.id);
+          if (
+            oldIds.length !== newIds.length ||
+            new Set(newIds).size !== newIds.length ||
+            oldIds.some((id) => !newIds.includes(id))
+          ) {
+            throw new FirestoreSecurityError(409, "Participant order changed.");
+          }
+        }
+        const resolvedPrivateParticipants = await resolveParticipantEmails(
+          request,
+          accessToken,
+          projectId,
+          privateParticipants,
+          context.privateFields.participants ?? [],
+        );
+        publicUpdates.participants = publicParticipants;
+        writes.push(
+          draftPrivateWrite(context, {
+            ...context.privateFields,
+            participants: resolvedPrivateParticipants,
+          }),
+        );
+      }
+
+      const publicWrite = documentUpdateWrite(
+        context.documentName,
+        publicUpdates,
+        Object.keys(publicUpdates).concat(["privacyVersion", "updatedAt"]),
+        [serverTimestampTransform("updatedAt")],
+      );
+      publicWrite.update.fields.privacyVersion = encodeFirestoreValue(1);
+      writes.unshift(publicWrite);
+      return { writes, result: { status: "updated" } };
+    });
+  }
+
+  async function drawDraftParticipants(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (!ownerOrAdmin(context, actorId, isGlobalAdmin)) {
+        throw new FirestoreSecurityError(403, "Only the owner or a global administrator may draw participants.");
+      }
+      if (context.fields.status !== "waiting") {
+        throw new FirestoreSecurityError(409, "The draft has already started.");
+      }
+      if (context.fields.participantOrderDrawn === true) {
+        throw new FirestoreSecurityError(409, "Participant order has already been drawn.");
+      }
+      const incoming = body.participants;
+      const { publicParticipants, privateParticipants } = participantParts(
+        incoming,
+        context.privateFields.participants,
+      );
+      const oldIds = (Array.isArray(context.fields.participants) ? context.fields.participants : [])
+        .map((participant) => isRecord(participant) ? participant.id : undefined);
+      const newIds = publicParticipants.map((participant) => participant.id);
+      const expectedIds = Array.isArray(body.expectedParticipantIds)
+        ? body.expectedParticipantIds
+        : [];
+      if (
+        oldIds.length !== newIds.length ||
+        oldIds.length === 0 ||
+        new Set(newIds).size !== newIds.length ||
+        oldIds.some((id, index) => id !== expectedIds[index]) ||
+        oldIds.some((id) => !newIds.includes(id))
+      ) {
+        throw new FirestoreSecurityError(409, "Participant order changed.");
+      }
+      const resolved = await resolveParticipantEmails(
+        request,
+        accessToken,
+        projectId,
+        privateParticipants,
+        context.privateFields.participants ?? [],
+      );
+      return {
+        writes: [
+          documentUpdateWrite(
+            context.documentName,
+            { participants: publicParticipants, participantOrderDrawn: true, privacyVersion: 1 },
+            ["participants", "participantOrderDrawn", "privacyVersion", "updatedAt"],
+            [serverTimestampTransform("updatedAt")],
+          ),
+          draftPrivateWrite(context, { ...context.privateFields, participants: resolved }),
+        ],
+        result: { status: "drawn" },
+      };
+    });
+  }
+
+  async function startDraftSecurely(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (!ownerOrAdmin(context, actorId, isGlobalAdmin)) {
+        throw new FirestoreSecurityError(403, "Only the owner or a global administrator may start this draft.");
+      }
+      if (context.fields.status !== "waiting") {
+        throw new FirestoreSecurityError(409, "The draft has already started.");
+      }
+      const expectedState: Record<string, unknown> = { status: "waiting" };
+      if (body.expectedParticipants !== undefined) {
+        expectedState.participants = body.expectedParticipants;
+      }
+      if (body.expectedTeamRanking !== undefined) {
+        expectedState.teamRanking = body.expectedTeamRanking;
+      }
+      validateExpectedDraftState(context, expectedState);
+
+      const { publicParticipants, privateParticipants } = participantParts(
+        body.participants,
+        context.privateFields.participants,
+      );
+      const participantIds = privateParticipants.map((participant) => participant.userId?.trim() ?? "");
+      if (
+        Number(context.fields.participantCount ?? 0) !== publicParticipants.length ||
+        publicParticipants.some((participant) => typeof participant.name !== "string" || !participant.name.trim()) ||
+        participantIds.some((id) => !id) ||
+        new Set(participantIds).size !== participantIds.length ||
+        !Array.isArray(context.fields.pickOrder) ||
+        context.fields.pickOrder.length === 0 ||
+        !Array.isArray(context.fields.availableItemIds) ||
+        context.fields.availableItemIds.length === 0
+      ) {
+        throw new FirestoreSecurityError(400, "The draft is not ready to start.");
+      }
+      const ranking = body.teamRanking;
+      if (
+        !Array.isArray(ranking) ||
+        ranking.length === 0 ||
+        ranking.some((team) => typeof team !== "string")
+      ) {
+        throw new FirestoreSecurityError(400, "Invalid team ranking.");
+      }
+      const resolved = await resolveParticipantEmails(
+        request,
+        accessToken,
+        projectId,
+        privateParticipants,
+        context.privateFields.participants ?? [],
+      );
+      return {
+        writes: [
+          documentUpdateWrite(
+            context.documentName,
+            {
+              participants: publicParticipants,
+              status: "drafting",
+              teamRanking: ranking,
+              teamRankingLocked: true,
+              privacyVersion: 1,
+            },
+            ["participants", "status", "teamRanking", "teamRankingLocked", "privacyVersion", "turnStartedAt", "updatedAt"],
+            [serverTimestampTransform("turnStartedAt"), serverTimestampTransform("updatedAt")],
+          ),
+          draftPrivateWrite(context, { ...context.privateFields, participants: resolved }),
+        ],
+        result: { status: "started" },
+      };
+    });
+  }
+
+  async function pickDraftItem(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    const itemId = requireString(body.itemId, "item ID", 128);
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      const participants = Array.isArray(context.fields.participants)
+        ? context.fields.participants.filter(isRecord)
+        : [];
+      const pickOrder = numberArray(context.fields.pickOrder);
+      const currentPickIndex = Number(context.fields.currentPickIndex ?? 0);
+      const participantIndex = pickOrder[currentPickIndex];
+      const actorRole = ownerOrAdmin(context, actorId, isGlobalAdmin);
+      if (!actorRole && participantIndexForUser(context, actorId) !== participantIndex) {
+        throw new FirestoreSecurityError(403, "Only the assigned participant may make this pick.");
+      }
+      if (
+        context.fields.status !== "drafting" ||
+        (body.expectedPickIndex !== undefined && body.expectedPickIndex !== currentPickIndex) ||
+        !Number.isInteger(participantIndex) ||
+        participantIndex < 0 ||
+        participantIndex >= participants.length
+      ) {
+        throw new FirestoreSecurityError(409, "The current draft turn has changed.");
+      }
+
+      const availableItemIds = stringArray(context.fields.availableItemIds);
+      if (!availableItemIds.includes(itemId)) {
+        throw new FirestoreSecurityError(409, "The selected team is no longer available.");
+      }
+      const rawItems = Array.isArray(context.fields.draftItems) ? context.fields.draftItems : [];
+      const selectedItem = rawItems.find((item) =>
+        typeof item === "string" ? item === itemId : isRecord(item) && item.id === itemId,
+      );
+      if (!selectedItem) throw new FirestoreSecurityError(400, "The selected team is invalid.");
+      const itemName = typeof selectedItem === "string"
+        ? selectedItem
+        : isRecord(selectedItem) && typeof selectedItem.name === "string"
+          ? selectedItem.name
+          : itemId;
+
+      const nextAvailableItemIds = availableItemIds.filter((id) => id !== itemId);
+      const nextStatus = getDraftStatusAfterPick(nextAvailableItemIds);
+      const nextParticipants = participants.map((participant, index) =>
+        index === participantIndex
+          ? { ...participant, picks: [...stringArray(participant.picks), itemId] }
+          : participant,
+      );
+      const nextHistory = [
+        ...(Array.isArray(context.fields.history) ? context.fields.history : []),
+        { type: "pick", participantIndex, itemId, itemName },
+      ];
+      const update: AutoPickUpdate = {
+        participants: nextParticipants as AutoPickParticipant[],
+        currentPickIndex: currentPickIndex + 1,
+        availableItemIds: nextAvailableItemIds,
+        history: nextHistory as AutoPickHistoryItem[],
+        status: nextStatus,
+      };
+      return {
+        writes: [buildPickWrite(context.documentName, update, nextStatus)],
+        result: { status: "picked", completed: nextStatus === "completed" },
+      };
+    });
+  }
+
+  async function skipDraftTurn(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (!ownerOrAdmin(context, actorId, isGlobalAdmin)) {
+        throw new FirestoreSecurityError(403, "Only the owner or a global administrator may skip a turn.");
+      }
+      const participants = Array.isArray(context.fields.participants)
+        ? context.fields.participants
+        : [];
+      const pickOrder = numberArray(context.fields.pickOrder);
+      const currentPickIndex = Number(context.fields.currentPickIndex ?? 0);
+      const currentParticipantIndex = pickOrder[currentPickIndex];
+      if (
+        context.fields.status !== "drafting" ||
+        (body.expectedPickIndex !== undefined && body.expectedPickIndex !== currentPickIndex) ||
+        !Number.isInteger(currentParticipantIndex)
+      ) {
+        throw new FirestoreSecurityError(409, "The current draft turn has changed.");
+      }
+
+      const availableItemIds = stringArray(context.fields.availableItemIds);
+      const nextStatus = getDraftStatusAfterPick(availableItemIds);
+      const nextPickOrder = extendSnakeOrderForSkippedPick(
+        pickOrder,
+        participants.length,
+        currentPickIndex,
+        availableItemIds.length,
+      );
+      const fields: Record<string, unknown> = {
+        status: nextStatus,
+        currentPickIndex: currentPickIndex + 1,
+        pickOrder: nextPickOrder,
+        history: [
+          ...(Array.isArray(context.fields.history) ? context.fields.history : []),
+          { type: "skip", participantIndex: currentParticipantIndex },
+        ],
+        privacyVersion: 1,
+      };
+      const fieldPaths = Object.keys(fields).concat(["turnStartedAt", "updatedAt"]);
+      const transforms = [serverTimestampTransform("updatedAt")];
+      if (nextStatus === "drafting") {
+        transforms.push(serverTimestampTransform("turnStartedAt"));
+      }
+      return {
+        writes: [documentUpdateWrite(context.documentName, fields, fieldPaths, transforms)],
+        result: { status: "skipped" },
+      };
+    });
+  }
+
+  async function savePlayerPriorities(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    const priorities = stringArray(body.priorities);
+    if (!Array.isArray(body.priorities) || priorities.length > 100 || priorities.some((id) => id.length > 128)) {
+      throw new FirestoreSecurityError(400, "Invalid player priorities.");
+    }
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (participantIndexForUser(context, actorId) < 0) {
+        throw new FirestoreSecurityError(403, "Only a draft participant may save priorities.");
+      }
+      const playerPriorities = { ...(context.privateFields.playerPriorities ?? {}), [actorId]: priorities };
+      return {
+        writes: [
+          draftPrivateWrite(context, { ...context.privateFields, playerPriorities }),
+          documentUpdateWrite(
+            context.documentName,
+            { privacyVersion: 1 },
+            ["privacyVersion", "updatedAt"],
+            [serverTimestampTransform("updatedAt")],
+          ),
+        ],
+        result: { status: "saved" },
+      };
+    });
+  }
+
+  async function sendDraftMessage(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    const text = requireString(body.text, "message", 500).trim();
+    if (!text) throw new FirestoreSecurityError(400, "Message cannot be empty.");
+
+    const message = await runDraftTransaction(
+      request,
+      projectId,
+      accessToken,
+      draftId,
+      async (context) => {
+        const owner = ownerOrAdmin(context, actorId, isGlobalAdmin);
+        if (!owner && participantIndexForUser(context, actorId) < 0) {
+          throw new FirestoreSecurityError(403, "Only a draft participant may send messages.");
+        }
+        const profile = await getUserProfile(request, accessToken, projectId, actorId);
+        if (!profile) throw new FirestoreSecurityError(403, "A user profile is required.");
+        const messageId = crypto.randomUUID();
+        const name = documentResource(projectId, `publicDrafts/${draftId}/messages`, messageId);
+        const role = owner ? "admin" : "participant";
+        const fields = {
+          userId: actorId,
+          displayName: typeof profile.displayName === "string" ? profile.displayName : "Uživatel",
+          role,
+          text,
+        };
+        return {
+          writes: [
+            {
+              ...documentUpdateWrite(
+                name,
+                fields,
+                Object.keys(fields).concat(["createdAt"]),
+                [serverTimestampTransform("createdAt")],
+              ),
+              currentDocument: { exists: false },
+            },
+          ],
+          result: { status: "sent", messageId },
+        };
+      },
+    );
+    return message;
+  }
+
+  async function searchDraftUsers(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    const prefix = requireString(body.prefix, "search prefix", 100).trim();
+    if (prefix.length < 1) return { users: [] };
+    const draft = await loadDraftForAccess(request, projectId, accessToken, draftId);
+    if (!ownerOrAdmin(
+      { ...draft, accessToken, baseUrl: "", documentName: "", privateDocumentName: "" },
+      actorId,
+      isGlobalAdmin,
+    ) || draft.fields.status !== "waiting") {
+      throw new FirestoreSecurityError(403, "Only the draft owner may search users.");
+    }
+    const prefixEnd = `${prefix}\uf8ff`;
+    const prefixRange = (fieldPath: string) => ({
+      compositeFilter: {
+        op: "AND",
+        filters: [
+          {
+            fieldFilter: {
+              field: { fieldPath },
+              op: "GREATER_THAN_OR_EQUAL",
+              value: { stringValue: prefix },
+            },
+          },
+          {
+            fieldFilter: {
+              field: { fieldPath },
+              op: "LESS_THAN_OR_EQUAL",
+              value: { stringValue: prefixEnd },
+            },
+          },
+        ],
+      },
+    });
+    const response = await request(
+      `${firestoreDocumentsUrl(projectId)}:runQuery`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId: "users" }],
+            where: {
+              compositeFilter: {
+                op: "OR",
+                filters: [
+                  prefixRange("displayName"),
+                  prefixRange("email"),
+                ],
+              },
+            },
+            limit: 20,
+          },
+        }),
+      },
+    );
+    const results = await readJsonStream(response, "Firestore user search");
+    const seen = new Set<string>();
+    const users = results.flatMap((result) => {
+      const document = asDocument(result);
+      if (!document?.name || !isRecord(document.fields)) return [];
+      const user = decodeFirestoreFields(document.fields);
+      const uid = document.name.split("/").at(-1) ?? "";
+      if (!uid || seen.has(uid) || (!String(user.displayName ?? "").toLowerCase().startsWith(prefix.toLowerCase()) &&
+        !String(user.email ?? "").toLowerCase().startsWith(prefix.toLowerCase()))) {
+        return [];
+      }
+      seen.add(uid);
+      return [{
+        uid,
+        displayName: typeof user.displayName === "string" ? user.displayName : "",
+        email: typeof user.email === "string" ? user.email : "",
+      }];
+    });
+    return { users };
+  }
+
+  async function deleteDraft(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (!ownerOrAdmin(context, actorId, isGlobalAdmin)) {
+        throw new FirestoreSecurityError(403, "Only the owner or a global administrator may delete this draft.");
+      }
+      return {
+        writes: [
+          { delete: context.documentName },
+          { delete: context.privateDocumentName },
+        ],
+        result: { status: "deleted" },
+      };
+    });
+  }
+
+  async function requireGlobalAdmin(
+    request: typeof fetch,
+    accessToken: string,
+    projectId: string,
+    actorId: string,
+  ) {
+    if (!isAdminProfile(await getUserProfile(request, accessToken, projectId, actorId))) {
+      throw new FirestoreSecurityError(403, "Administrator access is required.");
+    }
+  }
+
+  async function writeProduct(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    body: Record<string, unknown>,
+    isUpdate: boolean,
+  ) {
+    await requireGlobalAdmin(request, accessToken, projectId, actorId);
+    const product = requireRecord(body.product, "Invalid product.");
+    const name = requireString(product.name, "product name", 160).trim();
+    const season = requireString(product.season, "product season", 80).trim();
+    const price = Number(product.defaultPrice);
+    if (!Number.isFinite(price) || price < 0) {
+      throw new FirestoreSecurityError(400, "Invalid product price.");
+    }
+    const active = product.active !== false;
+    const id = isUpdate ? requireString(body.productId, "product ID", 128) : crypto.randomUUID();
+    const fields = {
+      name,
+      season,
+      defaultPrice: price,
+      currency: "CZK",
+      active,
+      imageUrl: typeof product.imageUrl === "string" ? product.imageUrl.slice(0, 2048) : null,
+    };
+    const baseUrl = firestoreDocumentsUrl(projectId);
+    const documentName = documentResource(projectId, "products", id);
+    const response = await request(`${baseUrl}:commit`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        writes: [
+          {
+            ...documentUpdateWrite(
+              documentName,
+              fields,
+              Object.keys(fields).concat(isUpdate ? ["updatedAt"] : ["createdAt", "updatedAt"]),
+              [
+                ...(!isUpdate ? [serverTimestampTransform("createdAt")] : []),
+                serverTimestampTransform("updatedAt"),
+              ],
+            ),
+            ...(isUpdate ? {} : { currentDocument: { exists: false } }),
+          },
+        ],
+      }),
+    });
+    await readJsonResponse(response, "Firestore product write");
+    return { status: "saved", productId: id };
+  }
+
+  async function writeRanking(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    body: Record<string, unknown>,
+  ) {
+    await requireGlobalAdmin(request, accessToken, projectId, actorId);
+    const productKey = requireString(body.productKey, "ranking ID", 200);
+    if (productKey.includes("/")) throw new FirestoreSecurityError(400, "Invalid ranking ID.");
+    const series = requireString(body.series, "series", 160).trim();
+    const season = requireString(body.season, "season", 80).trim();
+    const teamOrder = body.teamOrder;
+    if (
+      !Array.isArray(teamOrder) ||
+      teamOrder.length === 0 ||
+      teamOrder.length > 100 ||
+      teamOrder.some((team) => typeof team !== "string" || team.length > 128)
+    ) {
+      throw new FirestoreSecurityError(400, "Invalid team ranking.");
+    }
+    const fields = {
+      series,
+      season,
+      productKey,
+      teamOrder,
+    };
+    const response = await request(`${firestoreDocumentsUrl(projectId)}:commit`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        writes: [
+          documentUpdateWrite(
+            documentResource(projectId, "teamRankings", productKey),
+            fields,
+            Object.keys(fields).concat(["createdAt", "updatedAt"]),
+            [serverTimestampTransform("createdAt"), serverTimestampTransform("updatedAt")],
+          ),
+        ],
+      }),
+    });
+    await readJsonResponse(response, "Firestore ranking write");
+    return { status: "saved" };
+  }
+
+  async function deleteRanking(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    body: Record<string, unknown>,
+  ) {
+    await requireGlobalAdmin(request, accessToken, projectId, actorId);
+    const rankingId = requireString(body.rankingId, "ranking ID", 200);
+    if (rankingId.includes("/")) throw new FirestoreSecurityError(400, "Invalid ranking ID.");
+    const response = await request(`${firestoreDocumentsUrl(projectId)}:commit`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        writes: [{ delete: documentResource(projectId, "teamRankings", rankingId) }],
+      }),
+    });
+    await readJsonResponse(response, "Firestore ranking deletion");
+    return { status: "deleted" };
+  }
+
+  async function upsertUserProfile(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actor: { uid: string; email?: string },
+    body: Record<string, unknown>,
+  ) {
+    const displayName = requireString(body.displayName, "display name", 100).trim();
+    const email = actor.email?.trim();
+    if (!email || email.length > 254) {
+      throw new FirestoreSecurityError(400, "The authenticated Firebase account has no usable email.");
+    }
+    const baseUrl = firestoreDocumentsUrl(projectId);
+    const name = documentResource(projectId, "users", actor.uid);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const started = await postJson<{ transaction?: string }>(
+        request,
+        `${baseUrl}:beginTransaction`,
+        accessToken,
+        { options: { readWrite: {} } },
+        "Firestore begin transaction",
+      );
+      if (!started.transaction) throw new Error("Firestore did not return a transaction ID.");
+      const transaction = started.transaction;
+      let committed = false;
+      let aborted = false;
+      try {
+        const existing = await getFirestoreDocument(request, accessToken, name, transaction);
+        const profile = existing?.fields ? decodeFirestoreFields(existing.fields) : null;
+        const fields = {
+          uid: actor.uid,
+          displayName,
+          email,
+          role: profile?.role === "admin" ? "admin" : "participant",
+        };
+        const write = documentUpdateWrite(
+          name,
+          fields,
+          Object.keys(fields).concat(existing ? ["updatedAt"] : ["createdAt", "updatedAt"]),
+          [
+            ...(!existing ? [serverTimestampTransform("createdAt")] : []),
+            serverTimestampTransform("updatedAt"),
+          ],
+        );
+        const response = await request(`${baseUrl}:commit`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${accessToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ transaction, writes: [write] }),
+        });
+        if (response.status === 409) {
+          aborted = true;
+          continue;
+        }
+        await readJsonResponse(response, "Firestore profile write");
+        committed = true;
+        return { status: "saved" };
+      } finally {
+        if (!committed && !aborted) {
+          await rollbackTransaction(request, baseUrl, accessToken, transaction);
+        }
+      }
+    }
+    throw new FirestoreSecurityError(409, "Could not save the user profile.");
+  }
+
+  export async function executeFirestoreSecurityOperation(
+    env: DraftWorkerEnv,
+    actor: { uid: string; email?: string },
+    body: Record<string, unknown>,
+    request: typeof fetch = fetch,
+  ): Promise<Record<string, unknown>> {
+    if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      throw new Error("FIREBASE_PROJECT_ID and FIREBASE_SERVICE_ACCOUNT_JSON must be configured.");
+    }
+    const operation = requireString(body.operation, "operation", 80);
+    const projectId = env.FIREBASE_PROJECT_ID;
+    const accessToken = await getAccessToken(env, request);
+    const profile = await getUserProfile(request, accessToken, projectId, actor.uid);
+    const globalAdmin = isAdminProfile(profile);
+
+    switch (operation) {
+      case "profile.get":
+        if (!profile) throw new FirestoreSecurityError(404, "User profile not found.");
+        return { profile: plainValue(profile) as Record<string, unknown> };
+      case "profile.save":
+        return upsertUserProfile(request, projectId, accessToken, actor, body);
+      case "draft.create":
+        return createDraft(request, projectId, accessToken, actor.uid, body);
+      case "draft.access":
+        return getDraftAccess(
+          request,
+          projectId,
+          accessToken,
+          actor.uid,
+          requireString(body.draftId, "draft ID", 128),
+        );
+    case "draft.join":
+      return joinDraft(request, projectId, accessToken, actor, body);
+      case "draft.update":
+        return updateDraft(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "draft.draw":
+        return drawDraftParticipants(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "draft.start":
+        return startDraftSecurely(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "draft.pick":
+        return pickDraftItem(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "draft.skip":
+        return skipDraftTurn(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "draft.priorities":
+        return savePlayerPriorities(request, projectId, accessToken, actor.uid, body);
+      case "draft.message":
+        return sendDraftMessage(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "draft.search-users":
+        return searchDraftUsers(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "draft.delete":
+        return deleteDraft(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "product.create":
+        return writeProduct(request, projectId, accessToken, actor.uid, body, false);
+      case "product.update":
+        return writeProduct(request, projectId, accessToken, actor.uid, body, true);
+      case "ranking.save":
+        return writeRanking(request, projectId, accessToken, actor.uid, body);
+      case "ranking.delete":
+        return deleteRanking(request, projectId, accessToken, actor.uid, body);
+      default:
+        throw new FirestoreSecurityError(400, "Unsupported Firestore operation.");
+    }
+}
+
+async function listCollectionDocuments(
+    request: typeof fetch,
+    accessToken: string,
+    collectionPath: string,
+) {
+    const documents: FirestoreDocument[] = [];
+    let pageToken = "";
+    do {
+      const url = new URL(
+        `https://firestore.googleapis.com/v1/${encodedResourceName(collectionPath)}`,
+      );
+      url.searchParams.set("pageSize", "100");
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const response = await request(url, {
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      const page = await readJsonResponse<{ documents?: FirestoreDocument[]; nextPageToken?: string }>(
+        response,
+        "Firestore migration document list",
+      );
+      if (Array.isArray(page.documents)) documents.push(...page.documents);
+      pageToken = page.nextPageToken ?? "";
+    } while (pageToken);
+    return documents;
+}
+
+async function commitMigrationWrites(
+    request: typeof fetch,
+    baseUrl: string,
+    accessToken: string,
+    writes: unknown[],
+) {
+    for (let offset = 0; offset < writes.length; offset += 400) {
+      const response = await request(`${baseUrl}:commit`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ writes: writes.slice(offset, offset + 400) }),
+      });
+      await readJsonResponse(response, "Firestore privacy migration commit");
+    }
+}
+
+function verifyMigrationFields(
+    existing: Record<string, unknown>,
+    expected: Record<string, unknown>,
+    label: string,
+) {
+    for (const [field, value] of Object.entries(expected)) {
+      if (!sameSecurityValue(existing[field], value)) {
+        throw new Error(`Refusing to delete legacy data because migrated ${label}.${field} does not match.`);
+      }
+    }
+}
+
+export async function runLegacyDraftPrivacyMigration(
+    env: DraftWorkerEnv,
+    request: typeof fetch = fetch,
+    onProgress: (completed: number, draftId: string) => void = () => {},
+) {
+    if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      throw new Error("FIREBASE_PROJECT_ID and FIREBASE_SERVICE_ACCOUNT_JSON must be configured.");
+    }
+
+    const projectId = env.FIREBASE_PROJECT_ID;
+    const accessToken = await getAccessToken(env, request);
+    const baseUrl = firestoreDocumentsUrl(projectId);
+    const legacyCollection = documentResource(projectId, "drafts", "placeholder")
+      .replace(/\/placeholder$/, "");
+    const legacyDocuments = await listCollectionDocuments(request, accessToken, legacyCollection);
+    let migrated = 0;
+
+    for (const legacyDocument of legacyDocuments) {
+      if (!legacyDocument.name || !isRecord(legacyDocument.fields)) continue;
+      const draftId = legacyDocument.name.split("/").at(-1) ?? "";
+      if (!DRAFT_ID_PATTERN.test(draftId)) {
+        throw new Error(`Legacy draft has an invalid document ID: ${draftId}`);
+      }
+      if (!legacyDocument.updateTime) {
+        throw new Error(`Legacy draft has no update timestamp; refusing to migrate it: ${draftId}`);
+      }
+
+      const publicName = documentResource(projectId, "publicDrafts", draftId);
+      const privateName = documentResource(projectId, "draftPrivate", draftId);
+      const [existingPublic, existingPrivate, legacyMessages] = await Promise.all([
+        getFirestoreDocument(request, accessToken, publicName),
+        getFirestoreDocument(request, accessToken, privateName),
+        listCollectionDocuments(
+          request,
+          accessToken,
+          `${legacyDocument.name}/messages`,
+        ),
+      ]);
+      const legacyMessagesWithUpdateTime = legacyMessages.map((message) => {
+        const updateTime = message.updateTime;
+        if (!updateTime) {
+          throw new Error(`Legacy chat message has no update timestamp; refusing to migrate it: ${draftId}`);
+        }
+        return { message, updateTime };
+      });
+
+      const legacyFields = decodeFirestoreFields(legacyDocument.fields);
+      const privateFields = privateFromLegacyFields(legacyFields);
+      const rawParticipants = Array.isArray(legacyFields.participants)
+        ? legacyFields.participants
+        : [];
+      const publicFields = Object.fromEntries(
+        Object.entries(legacyFields).filter(([key]) =>
+          key !== "ownerUserId" &&
+          key !== "playerPriorities" &&
+        key !== "privacyVersion",
+        ),
+      );
+      publicFields.participants = rawParticipants.map((participant) =>
+        isRecord(participant) ? stripPrivateParticipantFields(participant) : {},
+      );
+      publicFields.privacyVersion = 1;
+
+      if (existingPublic) {
+        if (!isRecord(existingPublic.fields)) {
+          throw new Error(`Refusing to overwrite an invalid public draft: ${draftId}`);
+        }
+        const currentPublic = decodeFirestoreFields(existingPublic.fields);
+        if (currentPublic.privacyVersion !== 1) {
+          throw new Error(`Refusing to overwrite an unverified public draft: ${draftId}`);
+        }
+        verifyMigrationFields(currentPublic, publicFields, `public draft ${draftId}`);
+      }
+      if (existingPrivate) {
+        if (!isRecord(existingPrivate.fields)) {
+          throw new Error(`Refusing to overwrite an invalid private draft: ${draftId}`);
+        }
+        const currentPrivate = decodeFirestoreFields(existingPrivate.fields);
+        verifyMigrationFields(
+          currentPrivate,
+          privateFields as unknown as Record<string, unknown>,
+          `private draft ${draftId}`,
+        );
+      }
+
+      const destinationMessageDeletes: Array<{ name: string; updateTime: string }> = [];
+      for (const { message: legacyMessage, updateTime } of legacyMessagesWithUpdateTime) {
+        if (!legacyMessage.name || !isRecord(legacyMessage.fields)) continue;
+        const messageId = legacyMessage.name.split("/").at(-1) ?? "";
+        if (!DRAFT_ID_PATTERN.test(messageId)) {
+          throw new Error(`Legacy message has an invalid document ID: ${messageId}`);
+        }
+        const publicMessageName = documentResource(
+          projectId,
+          `publicDrafts/${draftId}/messages`,
+          messageId,
+        );
+        const existingMessage = await getFirestoreDocument(request, accessToken, publicMessageName);
+        const messageFields = decodeFirestoreFields(legacyMessage.fields);
+        if (!existingMessage) {
+          const messageWrite = documentUpdateWrite(
+            publicMessageName,
+            messageFields,
+            Object.keys(messageFields),
+          );
+          messageWrite.currentDocument = { exists: false };
+          await commitMigrationWrites(request, baseUrl, accessToken, [messageWrite]);
+        } else if (existingMessage.fields) {
+          verifyMigrationFields(
+            decodeFirestoreFields(existingMessage.fields),
+            messageFields,
+            `chat message ${draftId}/${messageId}`,
+          );
+        } else {
+          throw new Error(`Refusing to delete a legacy chat message with an invalid destination: ${draftId}/${messageId}`);
+        }
+        destinationMessageDeletes.push({
+          name: legacyMessage.name,
+          updateTime,
+        });
+      }
+
+      const writes: unknown[] = [];
+      if (!existingPublic) {
+        const publicWrite = documentUpdateWrite(
+          publicName,
+          publicFields,
+          Object.keys(publicFields),
+        );
+        publicWrite.currentDocument = { exists: false };
+        writes.push(publicWrite);
+      }
+      if (!existingPrivate) {
+        const privateWrite = documentUpdateWrite(
+          privateName,
+          privateFields as unknown as Record<string, unknown>,
+          ["ownerUserId", "participants", "playerPriorities"],
+        );
+        privateWrite.currentDocument = { exists: false };
+        writes.push(privateWrite);
+      }
+      await commitMigrationWrites(request, baseUrl, accessToken, writes);
+
+      await commitMigrationWrites(
+        request,
+        baseUrl,
+        accessToken,
+        destinationMessageDeletes.map(({ name, updateTime }) => ({
+          delete: name,
+          currentDocument: { updateTime },
+        })),
+      );
+      await commitMigrationWrites(request, baseUrl, accessToken, [
+        {
+          delete: legacyDocument.name,
+          currentDocument: { updateTime: legacyDocument.updateTime },
+        },
+      ]);
+      migrated += 1;
+      onProgress(migrated, draftId);
+    }
+
+    return { scanned: legacyDocuments.length, migrated };
 }

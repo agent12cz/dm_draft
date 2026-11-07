@@ -6,6 +6,7 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
+import { callFirestoreWorker } from "@/lib/firestoreWorker";
 import { defaultDraftItems, type DraftItem } from "@/lib/snakeDraft";
 import {
   createProductKey,
@@ -192,20 +193,12 @@ function RankingsPageContent() {
     setSuccessMessage(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-
-      await firestoreApi.setDoc(
-        firestoreApi.doc(db, "teamRankings", productKey),
-        {
-          series: cleanSeries,
-          season: cleanSeason,
-          productKey,
-          teamOrder: finalOrder,
-          updatedAt: firestoreApi.serverTimestamp(),
-          createdAt: firestoreApi.serverTimestamp(),
-        },
-        { merge: true },
-      );
+      await callFirestoreWorker("ranking.save", {
+        productKey,
+        series: cleanSeries,
+        season: cleanSeason,
+        teamOrder: finalOrder,
+      });
 
       setSuccessMessage(`Žebříček pro „${cleanSeries} ${cleanSeason}“ byl úspěšně uložen.`);
       setIsEditing(false);
@@ -224,8 +217,7 @@ function RankingsPageContent() {
     }
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.deleteDoc(firestoreApi.doc(db, "teamRankings", ranking.id));
+      await callFirestoreWorker("ranking.delete", { rankingId: ranking.id });
       setSuccessMessage(`Žebříček „${ranking.series} ${ranking.season}“ byl smazán.`);
       await loadData();
     } catch (deleteErr) {

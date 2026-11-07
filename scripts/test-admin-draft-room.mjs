@@ -51,6 +51,14 @@ runInNewContext(compiled, {
       doc: () => "draft",
       onSnapshot: (_ref, callback) => { snapshotListener = callback; return () => {}; },
     } }) };
+    if (name === "@/lib/firestoreWorker") return {
+      callFirestoreWorker: async () => ({}),
+      getDraftPrivateAccess: async () => ({
+        authorized: true,
+        role: "owner",
+        participants: fixture?.participants ?? [],
+      }),
+    };
     if (name === "@/lib/snakeDraft") return { normalizeDraftItem: (item) => item };
     if (name.startsWith("@/lib/")) return {};
     return require(name);
@@ -151,6 +159,7 @@ const cleanup = effects[0]();
 for (let index = 0; index < 8; index += 1) await Promise.resolve();
 assert.ok(snapshotListener);
 snapshotListener({ id: "TEST", exists: () => true, data: () => fixture });
+for (let index = 0; index < 8; index += 1) await Promise.resolve();
 assert.ok(snapshotDraft);
 fixture = snapshotDraft;
 stateIndex = 0;

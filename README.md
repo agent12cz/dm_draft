@@ -39,9 +39,35 @@ On `/play/[code]`, a single chat panel stays mounted above My Teams in the secon
 
 ## Administrator draw and print
 
-Before a draft starts, the administrator may draw the participant order once. A Firestore transaction saves both the shuffled participants and `participantOrderDrawn`; the five-second animation is only a local preview and interrupting it does not undo the saved result. Manual reordering remains available before the start. Older drafts without the flag are treated as not yet drawn because earlier draws were not recorded. Existing Firestore authorization rules remain responsible for restricting writes.
+Before a draft starts, the administrator may draw the participant order once. An authenticated Firestore Worker transaction saves both the shuffled participants and `participantOrderDrawn`; the five-second animation is only a local preview and interrupting it does not undo the saved result. Manual reordering remains available before the start. Older drafts without the flag are treated as not yet drawn because earlier draws were not recorded.
 
 The results print view includes the draft's saved box composition and total quantity, followed by participants and teams, without prices or margin. Legacy drafts without a `boxes` array use their saved product fields. The print layout is designed for A4.
+
+## Firestore privacy and authorization
+
+Drafts are split between the publicly readable `publicDrafts` collection and the Worker-only `draftPrivate` collection. Public draft documents omit owner IDs, participant user IDs, emails, PINs and player priorities. The private document stores those values, and the authenticated Worker returns them only to the owner, a global administrator or the assigned participant. User profiles are also Worker-only. Products, team rankings, public draft data and draft chat remain readable by clients.
+
+All client writes to drafts, chat, user profiles, products and rankings go through `/api/firestore`. The route verifies the Firebase ID token; the Worker checks ownership, role and participant assignment, then commits the authorized changes through the Firestore REST API using the Cloudflare Worker service-account secret. Direct Firestore client writes are denied by `firestore.rules`. The rules contain no date condition or automatic expiry, so the database access policy does not stop working after 1 January 2027. Firebase Functions and Cloud Scheduler are not required; this design remains compatible with Firebase Spark quotas. Cloudflare Worker usage and Firebase Spark quotas are separate.
+
+### Migrating existing drafts
+
+Before publishing `firestore.rules`, migrate legacy documents from `drafts` (including chat messages) to `publicDrafts` and `draftPrivate`. Deploy the application Worker with the new API before publishing the rules; otherwise clients using the old app or old Worker will no longer be able to write. Do not publish restrictive rules until the migration and Worker rollout are complete.
+
+The migration command is a no-op unless `--apply` is passed. Keep the service-account key in a protected file outside the repository:
+
+```bash
+FIREBASE_PROJECT_ID=your-project-id \
+FIREBASE_SERVICE_ACCOUNT_FILE=/secure/path/service-account.json \
+npm run migrate:firestore-privacy
+
+FIREBASE_PROJECT_ID=your-project-id \
+FIREBASE_SERVICE_ACCOUNT_FILE=/secure/path/service-account.json \
+npm run migrate:firestore-privacy -- --apply
+```
+
+The first command makes no changes. The second copies each destination and checks any pre-existing destination fields against the legacy data before deleting its source; conflicts stop the migration without deleting the conflicting legacy document. Source deletes use Firestore `updateTime` preconditions, so changes during migration abort rather than being silently lost. Run it in a maintenance window after stopping legacy-client writes, since new chat messages can otherwise arrive while subcollections are being copied. It is intended to be run by an operator and is not run as part of tests or deployment. Review the migration output and back up the project before applying it. Ownerless legacy drafts stay ownerless: participants can continue playing, but only a global administrator can perform organizer operations. No first-user ownership claim is performed.
+
+Run `npm test` to execute application and Worker tests plus the Firestore Emulator rules tests. The rules tests verify public/private boundaries, deny direct client writes and confirm there is no time-based rule expiry.
 
 ## Automatic draft picks
 

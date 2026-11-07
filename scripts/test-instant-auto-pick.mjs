@@ -10,7 +10,7 @@ import { consumeRateLimit, resetRateLimits } from "../workers/rateLimit.ts";
 import { buildSnakeOrder } from "../src/lib/snakeDraft.js";
 
 const PROJECT_ID = "dm-draft-c9a3d";
-const DOCUMENT_NAME = `projects/${PROJECT_ID}/databases/(default)/documents/drafts/ABCDE`;
+const DOCUMENT_NAME = `projects/${PROJECT_ID}/databases/(default)/documents/publicDrafts/ABCDE`;
 
 const signingKeyPair = await crypto.subtle.generateKey(
   {
@@ -214,12 +214,15 @@ function createFirestoreMock(initialDraft) {
       return Response.json({ writeResults: [] });
     }
 
-    if (url.includes("/documents/drafts/")) {
+    if (url.includes("/documents/publicDrafts/")) {
       const transaction = new URL(url).searchParams.get("transaction");
       if (transaction) {
         transactionReads.set(transaction, current.currentPickIndex);
       }
       return Response.json({ name: DOCUMENT_NAME, fields: firestoreFields(current) });
+    }
+    if (url.includes("/documents/draftPrivate/")) {
+      return Response.json({ error: { status: "NOT_FOUND" } }, { status: 404 });
     }
 
     throw new Error(`Unexpected request: ${url}`);

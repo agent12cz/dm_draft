@@ -123,10 +123,18 @@ runInNewContext(compiled, {
   require: (name) => {
     if (name === "react") return hooks;
     if (name === "@/lib/firebase") return { getFirebaseClient: async () => ({ db: {}, firestoreApi }) };
+    if (name === "@/lib/firestoreWorker") return {
+      callFirestoreWorker: async (operation, payload) => {
+        writes.push({ operation, payload });
+        return { status: "sent" };
+      },
+      getDraftPrivateAccess: async () => ({ authorized: true }),
+    };
     return require(name);
   },
   console,
   Intl,
+  window: { setInterval: () => 1, clearInterval: () => {} },
 });
 const { DraftChat } = chatModule.exports;
 function find(node, predicate) {
@@ -157,29 +165,22 @@ async function settle() {
 }
 render();
 await settle();
-assert.equal(subscriptions, 2);
-listeners.get("drafts/ABCDE")({
-  exists: () => true,
-  data: () => ({ participants: [{ userId: "player-1" }] }),
-});
+assert.equal(subscriptions, 1);
 let tree = render();
 const textarea = () => find(tree, (node) => node.type === "textarea");
 textarea().props.onChange({ target: { value: "Rozpracovaná zpráva" } });
 for (let index = 0; index < 10; index += 1) {
-  listeners.get("drafts/ABCDE")({
-    exists: () => true,
-    data: () => ({ participants: [{ userId: "player-1" }], currentPickIndex: index }),
-  });
-  tree = render();
+  emitMessages(`Draft update ${index}`);
   await settle();
 }
 assert.equal(textarea().props.value, "Rozpracovaná zpráva");
-assert.equal(subscriptions, 2);
+assert.equal(subscriptions, 1);
 assert.equal(unsubscriptions, 0);
-console.log("✓ Ten draft updates preserve the composer and keep one access and one messages listener");
+scrolls.length = 0;
+console.log("✓ Chat updates preserve the composer and keep one message listener");
 
 function emitMessages(text) {
-  listeners.get("drafts/ABCDE/messages")({
+  listeners.get("publicDrafts/ABCDE/messages")({
     docs: [{
       id: text,
       data: (options) => {
@@ -224,11 +225,12 @@ await settle();
 tree = render();
 assert.equal(prevented, true);
 assert.equal(writes.length, 1);
-assert.equal(writes[0].path, "drafts/ABCDE/messages");
-assert.equal(writes[0].data.text, "Rozpracovaná zpráva");
+assert.equal(writes[0].operation, "draft.message");
+assert.equal(writes[0].payload.draftId, "ABCDE");
+assert.equal(writes[0].payload.text, "Rozpracovaná zpráva");
 assert.equal(textarea().props.value, "");
 slots.forEach((slot) => slot?.cleanup?.());
-assert.equal(unsubscriptions, 2);
+assert.equal(unsubscriptions, 1);
 assert.equal(listeners.size, 0);
-console.log("✓ Enter sends through the unchanged Firestore path, Shift+Enter does not, and unmount cleans up listeners");
+console.log("✓ Enter sends through the authorized Worker, Shift+Enter does not, and unmount cleans up listeners");
 console.log("\nALL DRAFT CHAT REGRESSION TESTS PASSED!");

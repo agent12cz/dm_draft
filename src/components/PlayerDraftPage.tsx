@@ -7,7 +7,7 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
-import { getDraftStatusAfterPick } from "@/lib/autoPick";
+import { callFirestoreWorker, getDraftPrivateAccess } from "@/lib/firestoreWorker";
 import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import { getTimeLeftForTurn, getTurnKey, type TurnCountdown } from "@/lib/turnCountdown";
@@ -144,7 +144,6 @@ function TeamLogo({
 }
 
 const INVALID_PICK_MESSAGE = "Výběr už není platný. Stav draftu byl aktualizován.";
-const PICK_CONFLICT_ERROR = "PICK_CONFLICT";
 
 function resolveHistoryItem(draftItems: DraftItem[], itemId?: string, itemName?: string) {
   if (itemId) {
@@ -229,7 +228,7 @@ export default function PlayerDraftPage() {
           return;
         }
 
-        const draftRef = firestoreApi.doc(db, "drafts", code);
+        const draftRef = firestoreApi.doc(db, "publicDrafts", code);
         let lastObservedTurn: string | null = null;
         let snapshotRevision = 0;
         const handleSnapshot = (snapshot: DocumentSnapshot, source = "listener") => {
@@ -237,6 +236,14 @@ export default function PlayerDraftPage() {
           snapshotRevision += 1;
           if (snapshot.exists()) {
             const data = snapshot.data();
+            const currentRevision = snapshotRevision;
+            if (!user) {
+              setError("Přihlaste se pro přístup k hráčskému draftu.");
+              setIsLoading(false);
+              return;
+            }
+            void getDraftPrivateAccess(snapshot.id).then((access) => {
+              if (!isMounted || snapshotRevision !== currentRevision) return;
             const turnStartedAtValue = data.turnStartedAt;
             const hasToDate = typeof turnStartedAtValue === "object"
               && turnStartedAtValue !== null
@@ -275,7 +282,6 @@ export default function PlayerDraftPage() {
               margin: Number(data.margin ?? 0),
               targetBreakPrice: Number(data.targetBreakPrice ?? 0),
               participantCount: Number(data.participantCount ?? 0),
-              participants: (data.participants ?? []) as DraftParticipant[],
               currentPickIndex: Number(data.currentPickIndex ?? 0),
               pickOrder: (data.pickOrder ?? []) as number[],
               draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
@@ -286,13 +292,23 @@ export default function PlayerDraftPage() {
               boxes: (data.boxes ?? []) as DraftBox[],
               teamRanking: Array.isArray(data.teamRanking) ? (data.teamRanking as string[]) : undefined,
               teamRankingLocked: Boolean(data.teamRankingLocked || (data.status && data.status !== "waiting")),
-              playerPriorities: (data.playerPriorities ?? {}) as Record<string, string[]>,
+              participants: access.participants as DraftParticipant[],
+              playerPriorities: user
+                ? { [user.uid]: access.playerPriorities }
+                : {},
+            });
+            setIsLoading(false);
+            }).catch((accessError) => {
+              console.error(accessError);
+              if (isMounted && snapshotRevision === currentRevision) {
+                setError("Nepodařilo se ověřit přístup k draftu.");
+                setIsLoading(false);
+              }
             });
           } else {
             setDraft(null);
+            setIsLoading(false);
           }
-
-          setIsLoading(false);
         };
         refreshDraftRef.current = async (signal) => {
           const revisionBeforeRead = snapshotRevision;
@@ -323,7 +339,7 @@ export default function PlayerDraftPage() {
       refreshDraftRef.current = null;
       unsubscribe?.();
     };
-  }, [code]);
+  }, [code, user]);
 
   useEffect(() => {
     if (draftStatus !== "drafting" || turnDurationSeconds === null
@@ -783,15 +799,10 @@ export default function PlayerDraftPage() {
     setPrioritiesFeedback(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-
-      await firestoreApi.updateDoc(
-        firestoreApi.doc(db, "drafts", draft.id),
-        new firestoreApi.FieldPath("playerPriorities", user.uid),
-        order,
-        "updatedAt",
-        firestoreApi.serverTimestamp(),
-      );
+      await callFirestoreWorker("draft.priorities", {
+        draftId: draft.id,
+        priorities: order,
+      });
 
       if (typeof window !== "undefined") {
         window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
@@ -831,89 +842,14 @@ export default function PlayerDraftPage() {
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.runTransaction(db, async (transaction) => {
-        const draftRef = firestoreApi.doc(db, "drafts", draft.id);
-        const latestSnapshot = await transaction.get(draftRef);
-
-        if (!latestSnapshot.exists()) {
-          throw new Error("Draft nebyl nalezen.");
-        }
-
-        const latestData = latestSnapshot.data();
-        const latestParticipants = (latestData.participants ?? []) as DraftParticipant[];
-        const latestPickOrder = (latestData.pickOrder ?? []) as number[];
-        const latestCurrentPickIndex = Number(latestData.currentPickIndex ?? 0);
-        const latestStatus = latestData.status ?? "waiting";
-        const latestAvailableItemIds = (latestData.availableItemIds ?? []) as string[];
-        const latestHistory = (latestData.history ?? []) as DraftHistoryItem[];
-        const latestCurrentParticipantIndex = latestPickOrder[latestCurrentPickIndex];
-        const latestCurrentParticipant = latestParticipants[latestCurrentParticipantIndex];
-        const expectedCurrentPickIndex = draft.currentPickIndex;
-        const expectedParticipantIndex = draft.pickOrder[expectedCurrentPickIndex];
-        const expectedParticipantUserId = currentParticipant.userId ?? "";
-
-        if (latestStatus !== "drafting") {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentPickIndex !== expectedCurrentPickIndex) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentParticipantIndex !== expectedParticipantIndex) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (!latestCurrentParticipant?.userId || latestCurrentParticipant.userId !== expectedParticipantUserId) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentParticipant.userId !== user.uid) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (!latestAvailableItemIds.includes(item.id)) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        const nextPickIndex = latestCurrentPickIndex + 1;
-        const nextAvailableItemIds = latestAvailableItemIds.filter((availableItemId) => availableItemId !== item.id);
-        const nextStatus = getDraftStatusAfterPick(nextAvailableItemIds);
-        const nextParticipants = latestParticipants.map((participant, index) =>
-          index === latestCurrentParticipantIndex ? { ...participant, picks: [...participant.picks, item.id] } : participant,
-        );
-        const nextHistory = [
-          ...latestHistory,
-          {
-            type: "pick" as const,
-            participantIndex: latestCurrentParticipantIndex,
-            itemId: item.id,
-            itemName: item.name,
-          },
-        ];
-
-        const nextDraftUpdate = {
-          status: nextStatus,
-          participants: nextParticipants,
-          currentPickIndex: nextPickIndex,
-          availableItemIds: nextAvailableItemIds,
-          history: nextHistory,
-          turnDurationSeconds: latestData.turnDurationSeconds === null ? null : Number(latestData.turnDurationSeconds ?? 15),
-          updatedAt: firestoreApi.serverTimestamp(),
-        } as Record<string, unknown>;
-
-        if (nextStatus === "drafting") {
-          nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
-        } else {
-          nextDraftUpdate.turnStartedAt = firestoreApi.deleteField();
-        }
-
-        transaction.update(draftRef, nextDraftUpdate);
+      await callFirestoreWorker("draft.pick", {
+        draftId: draft.id,
+        itemId: item.id,
+        expectedPickIndex: draft.currentPickIndex,
       });
     } catch (pickError) {
       console.error(pickError);
-      if (pickError instanceof Error && pickError.message === PICK_CONFLICT_ERROR) {
+      if (pickError instanceof Error && pickError.message.includes("změnil")) {
         setError(INVALID_PICK_MESSAGE);
       } else {
         setError("Nepodařilo se uložit výběr.");

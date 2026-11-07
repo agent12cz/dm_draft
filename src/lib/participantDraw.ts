@@ -1,4 +1,5 @@
 import type { Firestore, DocumentReference, DocumentData, Transaction } from "firebase/firestore";
+import { callFirestoreWorker } from "@/lib/firestoreWorker";
 
 type Participant = { id: string };
 
@@ -42,8 +43,8 @@ function randomIndex(max: number): number {
 }
 
 export async function drawParticipantOrder<T extends Participant>(
-  db: Firestore,
-  firestoreApi: DrawFirestore,
+  _db: Firestore,
+  _firestoreApi: DrawFirestore,
   draftId: string,
   participants: T[],
   normalize: (participant: T, index: number) => T,
@@ -54,25 +55,10 @@ export async function drawParticipantOrder<T extends Participant>(
     [order[index], order[selected]] = [order[selected], order[index]];
   }
   const initialIds = participants.map((participant) => participant.id);
-  const draftRef = firestoreApi.doc(db, "drafts", draftId);
-
-  await firestoreApi.runTransaction(db, async (transaction) => {
-    const snapshot = await transaction.get(draftRef);
-    if (!snapshot.exists()) throw new ParticipantDrawError("not-found");
-    const data = snapshot.data();
-    if (data.participantOrderDrawn === true) throw new ParticipantDrawError("already-drawn");
-    if ((data.status ?? "waiting") !== "waiting") throw new ParticipantDrawError("not-waiting");
-    const current = ((data.participants ?? []) as T[]).map(normalize);
-    if (current.length !== initialIds.length || current.some((participant, index) => participant.id !== initialIds[index])) {
-      throw new ParticipantDrawError("participants-changed");
-    }
-    if (new Set(current.map((participant) => participant.id)).size !== current.length) {
-      throw new ParticipantDrawError("participants-changed");
-    }
-    transaction.update(draftRef, {
-      participants: order.map((index) => current[index]),
-      participantOrderDrawn: true,
-      updatedAt: firestoreApi.serverTimestamp(),
-    });
+  const normalized = participants.map(normalize);
+  await callFirestoreWorker("draft.draw", {
+    draftId,
+    expectedParticipantIds: initialIds,
+    participants: order.map((index) => normalized[index]),
   });
 }

@@ -8,6 +8,7 @@ import { PageContainer } from "@/components/PageContainer";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
+import { callFirestoreWorker } from "@/lib/firestoreWorker";
 import { createDraftWithUniqueCode } from "@/lib/createDraft";
 import { buildSnakeOrder, defaultDraftItems } from "@/lib/snakeDraft";
 import AuthGuard from "@/app/auth-guard";
@@ -131,7 +132,7 @@ function HomeContent() {
         }
 
         unsubscribe = firestoreApi.onSnapshot(
-          firestoreApi.collection(db, "drafts"),
+          firestoreApi.collection(db, "publicDrafts"),
           (snapshot) => {
             if (!isMounted) {
               return;
@@ -248,8 +249,7 @@ function HomeContent() {
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.deleteDoc(firestoreApi.doc(db, "drafts", draftToDelete.id));
+      await callFirestoreWorker("draft.delete", { draftId: draftToDelete.id });
       setDraftToDelete(null);
     } catch (deleteError) {
       console.error(deleteError);

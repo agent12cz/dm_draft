@@ -78,7 +78,7 @@ function workerFixture({ priorities, availableItemIds = ["team-a", "team-b"], la
     turnDurationSeconds: 30,
     turnStartedAt: new Date(now - 60_000).toISOString(),
   };
-  const documentName = "projects/dm-draft-c9a3d/databases/(default)/documents/drafts/ABCDE";
+  const documentName = "projects/dm-draft-c9a3d/databases/(default)/documents/publicDrafts/ABCDE";
 
   return { draft, documentName, now };
 }

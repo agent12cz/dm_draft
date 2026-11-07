@@ -34,21 +34,25 @@ const teams = [
   }
   visit(source);
   assert.ok(saveFunction);
-  const updates = [];
-  function visitUpdates(node) {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.expression.getText(source) === "firestoreApi" && node.expression.name.text === "updateDoc") {
-      updates.push(node.arguments);
+  const workerCalls = [];
+  function visitWorkerCalls(node) {
+    const isWorkerCall = ts.isCallExpression(node) && (
+      ts.isIdentifier(node.expression) && node.expression.text === "callFirestoreWorker" ||
+      ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "callFirestoreWorker"
+    );
+    if (isWorkerCall) {
+      workerCalls.push(node.arguments);
     }
-    ts.forEachChild(node, visitUpdates);
+    ts.forEachChild(node, visitWorkerCalls);
   }
-  visitUpdates(saveFunction);
-  assert.equal(updates.length, 1);
-  const args = updates[0];
-  assert.equal(args.length, 5);
-  assert.equal(args[1].getText(source), 'new firestoreApi.FieldPath("playerPriorities", user.uid)');
-  assert.equal(args[2].getText(source), "order");
-  assert.equal(args[3].getText(source), '"updatedAt"');
+  visitWorkerCalls(saveFunction);
+  assert.equal(workerCalls.length, 1);
+  const [operation, payload] = workerCalls[0];
+  assert.equal(operation.getText(source), '"draft.priorities"');
+  assert.deepEqual(
+    payload.properties.map((property) => property.name.getText(source)),
+    ["draftId", "priorities"],
+  );
   const result = buildAutomaticPickUpdate({
     participants: [
       { userId: "player-2", picks: [] },

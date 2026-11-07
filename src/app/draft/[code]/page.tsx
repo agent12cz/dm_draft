@@ -7,11 +7,8 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
-import { getDraftStatusAfterPick } from "@/lib/autoPick";
-import {
-  extendSnakeOrderForSkippedPick,
-  normalizeDraftItem,
-} from "@/lib/snakeDraft";
+import { callFirestoreWorker, getDraftPrivateAccess } from "@/lib/firestoreWorker";
+import { normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import AuthGuard from "@/app/auth-guard";
 import { useAuth } from "@/components/AuthProvider";
@@ -180,7 +177,6 @@ function TeamLogo({ item, className = "h-8 w-8" }: { item?: DraftItem | null; cl
 }
 
 const INVALID_PICK_MESSAGE = "Výběr už není platný. Stav draftu byl aktualizován.";
-const TURN_CONFLICT_ERROR = "TURN_CONFLICT";
 
 function DraftDetailPageContent() {
   const params = useParams();
@@ -301,6 +297,7 @@ function DraftDetailPageContent() {
 
     let isMounted = true;
     let unsubscribe: (() => void) | null = null;
+    let accessSequence = 0;
 
     void (async () => {
       try {
@@ -310,12 +307,21 @@ function DraftDetailPageContent() {
           return;
         }
 
-        const draftRef = firestoreApi.doc(db, "drafts", code);
+        const draftRef = firestoreApi.doc(db, "publicDrafts", code);
         unsubscribe = firestoreApi.onSnapshot(
           draftRef,
           (snapshot) => {
             if (snapshot.exists()) {
               const data = snapshot.data();
+              const requestId = ++accessSequence;
+              void getDraftPrivateAccess(snapshot.id).then((access) => {
+                if (!isMounted || requestId !== accessSequence) return;
+                if (!access.authorized || (access.role !== "owner" && access.role !== "admin")) {
+                  setDraft(null);
+                  setError("Tento draft můžete spravovat pouze jako jeho organizátor.");
+                  setIsLoading(false);
+                  return;
+                }
               const resolvedTurnDurationSeconds = data.turnDurationSeconds === null
                 ? null
                 : Number(data.turnDurationSeconds ?? 15);
@@ -335,7 +341,7 @@ function DraftDetailPageContent() {
                 margin: Number(data.margin ?? 0),
                 targetBreakPrice: Number(data.targetBreakPrice ?? 0),
                 participantCount: Number(data.participantCount ?? 0),
-                participants: ((data.participants ?? []) as DraftParticipant[]).map((participant, index) => normalizeParticipant(participant, index)),
+                participants: access.participants.map((participant, index) => normalizeParticipant(participant as DraftParticipant, index)),
                 currentPickIndex: Number(data.currentPickIndex ?? 0),
                 pickOrder: (data.pickOrder ?? []) as number[],
                 draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
@@ -363,11 +369,19 @@ function DraftDetailPageContent() {
               } else {
                 setCustomTurnDurationSeconds("15");
               }
+              setError(null);
+              setIsLoading(false);
+              }).catch((accessError) => {
+                console.error(accessError);
+                if (isMounted && requestId === accessSequence) {
+                  setError("Nepodařilo se ověřit oprávnění k draftu.");
+                  setIsLoading(false);
+                }
+              });
             } else {
               setDraft(null);
+              setIsLoading(false);
             }
-
-            setIsLoading(false);
           },
           (loadError) => {
             console.error(loadError);
@@ -403,24 +417,11 @@ function DraftDetailPageContent() {
     const searchTimeout = window.setTimeout(async () => {
       setIsSearchingUsers(true);
       try {
-        const { db, firestoreApi } = await getFirebaseClient();
-        const usersRef = firestoreApi.collection(db, "users");
-        const searchQuery = firestoreApi.query(
-          usersRef,
-          firestoreApi.where("displayName", ">=", userSearch.trim()),
-          firestoreApi.where("displayName", "<=", `${userSearch.trim()}\uf8ff`),
+        const result = await callFirestoreWorker<{ users: Array<{ uid: string; displayName: string; email: string }> }>(
+          "draft.search-users",
+          { draftId: draft.id, prefix: userSearch.trim() },
         );
-        const snapshot = await firestoreApi.getDocs(searchQuery);
-        const foundUsers = snapshot.docs
-          .map((document) => document.data())
-          .filter((candidate) => candidate.displayName || candidate.email)
-          .map((candidate) => ({
-            uid: candidate.uid as string,
-            displayName: (candidate.displayName as string) || "",
-            email: (candidate.email as string) || "",
-          }));
-
-        setMatchingUsers(foundUsers);
+        setMatchingUsers(result.users);
       } catch (searchError) {
         console.error(searchError);
         setMatchingUsers([]);
@@ -638,11 +639,12 @@ function DraftDetailPageContent() {
     setIsSavingRanking(true);
     setRankingFeedback(null);
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
       const validOrder = ensureAllTeamsInOrder(rankingOrder);
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+      await callFirestoreWorker("draft.update", {
+        draftId: draft.id,
+        updates: {
         teamRanking: validOrder,
-        updatedAt: firestoreApi.serverTimestamp(),
+        },
       });
       setRankingFeedback("Žebříček byl úspěšně uložen do tohoto draftu.");
     } catch (err) {
@@ -662,10 +664,9 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
-        ...updates,
-        updatedAt: firestoreApi.serverTimestamp(),
+      await callFirestoreWorker("draft.update", {
+        draftId: draft.id,
+        updates,
       });
     } catch (updateError) {
       console.error(updateError);
@@ -695,10 +696,9 @@ function DraftDetailPageContent() {
 
     const nextTurnDurationSeconds = nextOption === "none" ? null : Number(nextOption);
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
-        turnDurationSeconds: nextTurnDurationSeconds,
-        updatedAt: firestoreApi.serverTimestamp(),
+      await callFirestoreWorker("draft.update", {
+        draftId: draft.id,
+        updates: { turnDurationSeconds: nextTurnDurationSeconds },
       });
     } catch (durationError) {
       console.error(durationError);
@@ -718,10 +718,9 @@ function DraftDetailPageContent() {
     }
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
-        turnDurationSeconds: parsedCustomValue,
-        updatedAt: firestoreApi.serverTimestamp(),
+      await callFirestoreWorker("draft.update", {
+        draftId: draft.id,
+        updates: { turnDurationSeconds: parsedCustomValue },
       });
     } catch (durationError) {
       console.error(durationError);
@@ -998,54 +997,7 @@ function DraftDetailPageContent() {
     setJoinMessage(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      const draftRef = await firestoreApi.getDocs(firestoreApi.query(firestoreApi.collection(db, "drafts"), firestoreApi.where("code", "==", normalizedCode)));
-      const draftDocument = draftRef.docs[0];
-
-      if (!draftDocument) {
-        setJoinMessage("Draft s tímto kódem nebyl nalezen.");
-        return;
-      }
-
-      const draftData = draftDocument.data() as Partial<Draft> & { participants?: DraftParticipant[] };
-      const participants = (draftData.participants ?? []).map((participant, index) => normalizeParticipant(participant, index));
-      const nextDisplayName = user.displayName?.trim() || user.email?.split("@", 1)[0] || "Uživatel";
-      const matchingSlotIndex = participants.findIndex((participant) => {
-        const participantName = (participant.displayName ?? participant.name ?? "").trim().toLowerCase();
-        const candidateName = nextDisplayName.trim().toLowerCase();
-        return participant.status !== "ready" && participantName === candidateName && !(participant.uid || participant.userId);
-      });
-
-      if (matchingSlotIndex === -1) {
-        setJoinMessage("Tvé jméno není mezi účastníky.");
-        return;
-      }
-
-      const nextParticipants = participants.map((participant, index) => {
-        if (index !== matchingSlotIndex) {
-          return participant;
-        }
-
-        return {
-          ...participant,
-          uid: user.uid,
-          userId: user.uid,
-          displayName: participant.displayName ?? participant.name ?? nextDisplayName,
-          name: participant.name || participant.displayName || nextDisplayName,
-          email: user.email ?? participant.email ?? "",
-          joinedAt: new Date(),
-          pickCount: participant.pickCount ?? participant.picks?.length ?? 0,
-          status: "ready" as const,
-        };
-      });
-
-      await commitParticipantUpdate(db, firestoreApi, draftDocument.id, {
-        participants,
-        status: draftData.status ?? "waiting",
-        participantOrderDrawn: draftData.participantOrderDrawn,
-      }, {
-        participants: nextParticipants,
-      }, normalizeParticipant, { waiting: true });
+      await callFirestoreWorker("draft.join", { draftId: normalizedCode });
 
       setJoinMessage("Připojili jste se k draftu.");
       setJoinDraftCode("");
@@ -1183,73 +1135,13 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.runTransaction(db, async (transaction) => {
-        const draftRef = firestoreApi.doc(db, "drafts", draft.id);
-        const latestSnapshot = await transaction.get(draftRef);
-
-        if (!latestSnapshot.exists()) {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        const latestData = latestSnapshot.data();
-        const latestStatus = latestData.status ?? "waiting";
-        const latestParticipants = (latestData.participants ?? []) as DraftParticipant[];
-        const latestPickOrder = (latestData.pickOrder ?? []) as number[];
-        const latestCurrentPickIndex = Number(latestData.currentPickIndex ?? 0);
-        const latestAvailableItemIds = (latestData.availableItemIds ?? []) as string[];
-        const latestHistory = (latestData.history ?? []) as DraftHistoryItem[];
-        const latestCurrentParticipantIndex = latestPickOrder[latestCurrentPickIndex];
-        const expectedCurrentPickIndex = draft.currentPickIndex;
-        const expectedParticipantIndex = draft.pickOrder[expectedCurrentPickIndex];
-
-        if (latestStatus !== "drafting") {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentPickIndex !== expectedCurrentPickIndex) {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentParticipantIndex !== expectedParticipantIndex) {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        const nextPickIndex = latestCurrentPickIndex + 1;
-        const nextPickOrder = extendSnakeOrderForSkippedPick(
-          latestPickOrder,
-          latestParticipants.length,
-          latestCurrentPickIndex,
-          latestAvailableItemIds.length,
-        );
-        const nextStatus = getDraftStatusAfterPick(latestAvailableItemIds);
-        const nextHistory = [
-          ...latestHistory,
-          {
-            type: "skip" as const,
-            participantIndex: latestCurrentParticipantIndex,
-          },
-        ];
-
-        const nextDraftUpdate = {
-          status: nextStatus,
-          currentPickIndex: nextPickIndex,
-          pickOrder: nextPickOrder,
-          history: nextHistory,
-          updatedAt: firestoreApi.serverTimestamp(),
-        } as Record<string, unknown>;
-
-        if (nextStatus === "drafting") {
-          nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
-        } else {
-          nextDraftUpdate.turnStartedAt = firestoreApi.deleteField();
-        }
-
-        transaction.update(draftRef, nextDraftUpdate);
+      await callFirestoreWorker("draft.skip", {
+        draftId: draft.id,
+        expectedPickIndex: draft.currentPickIndex,
       });
     } catch (skipError) {
       console.error(skipError);
-      if (skipError instanceof Error && skipError.message === TURN_CONFLICT_ERROR) {
+      if (skipError instanceof Error && skipError.message.includes("změnil")) {
         setError(INVALID_PICK_MESSAGE);
       } else {
         setError("Nepodařilo se přeskočit účastníka.");
@@ -1268,78 +1160,14 @@ function DraftDetailPageContent() {
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.runTransaction(db, async (transaction) => {
-        const draftRef = firestoreApi.doc(db, "drafts", draft.id);
-        const latestSnapshot = await transaction.get(draftRef);
-
-        if (!latestSnapshot.exists()) {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        const latestData = latestSnapshot.data();
-        const latestStatus = latestData.status ?? "waiting";
-        const latestParticipants = (latestData.participants ?? []) as DraftParticipant[];
-        const latestPickOrder = (latestData.pickOrder ?? []) as number[];
-        const latestCurrentPickIndex = Number(latestData.currentPickIndex ?? 0);
-        const latestAvailableItemIds = (latestData.availableItemIds ?? []) as string[];
-        const latestHistory = (latestData.history ?? []) as DraftHistoryItem[];
-        const latestCurrentParticipantIndex = latestPickOrder[latestCurrentPickIndex];
-        const expectedCurrentPickIndex = draft.currentPickIndex;
-        const expectedParticipantIndex = draft.pickOrder[expectedCurrentPickIndex];
-
-        if (latestStatus !== "drafting") {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentPickIndex !== expectedCurrentPickIndex) {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentParticipantIndex !== expectedParticipantIndex) {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        if (!latestAvailableItemIds.includes(item.id)) {
-          throw new Error(TURN_CONFLICT_ERROR);
-        }
-
-        const nextPickIndex = latestCurrentPickIndex + 1;
-        const nextAvailableItemIds = latestAvailableItemIds.filter((availableItemId) => availableItemId !== item.id);
-        const nextStatus = getDraftStatusAfterPick(nextAvailableItemIds);
-        const nextParticipants = latestParticipants.map((participant, index) =>
-          index === latestCurrentParticipantIndex ? { ...participant, picks: [...participant.picks, item.id] } : participant,
-        );
-        const nextHistory = [
-          ...latestHistory,
-          {
-            type: "pick" as const,
-            participantIndex: latestCurrentParticipantIndex,
-            itemId: item.id,
-            itemName: item.name,
-          },
-        ];
-
-        const nextDraftUpdate = {
-          status: nextStatus,
-          participants: nextParticipants,
-          currentPickIndex: nextPickIndex,
-          availableItemIds: nextAvailableItemIds,
-          history: nextHistory,
-          updatedAt: firestoreApi.serverTimestamp(),
-        } as Record<string, unknown>;
-
-        if (nextStatus === "drafting") {
-          nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
-        } else {
-          nextDraftUpdate.turnStartedAt = firestoreApi.deleteField();
-        }
-
-        transaction.update(draftRef, nextDraftUpdate);
+      await callFirestoreWorker("draft.pick", {
+        draftId: draft.id,
+        itemId: item.id,
+        expectedPickIndex: draft.currentPickIndex,
       });
     } catch (pickError) {
       console.error(pickError);
-      if (pickError instanceof Error && pickError.message === TURN_CONFLICT_ERROR) {
+      if (pickError instanceof Error && pickError.message.includes("změnil")) {
         setError(INVALID_PICK_MESSAGE);
       } else {
         setError("Nepodařilo se uložit výběr.");

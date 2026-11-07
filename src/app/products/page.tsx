@@ -6,6 +6,7 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
+import { callFirestoreWorker } from "@/lib/firestoreWorker";
 import AuthGuard from "@/app/auth-guard";
 
 type Product = {
@@ -96,7 +97,6 @@ function ProductsPageContent() {
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
       const trimmedName = formValues.name.trim();
       const trimmedSeason = formValues.season.trim();
       const parsedPrice = Number(formValues.defaultPrice);
@@ -106,15 +106,14 @@ function ProductsPageContent() {
         return;
       }
 
-      await firestoreApi.addDoc(firestoreApi.collection(db, "products"), {
-        name: trimmedName,
-        season: trimmedSeason,
-        defaultPrice: parsedPrice,
-        currency: "CZK",
-        active: true,
-        imageUrl: formValues.imageUrl.trim() || null,
-        createdAt: firestoreApi.serverTimestamp(),
-        updatedAt: firestoreApi.serverTimestamp(),
+      await callFirestoreWorker("product.create", {
+        product: {
+          name: trimmedName,
+          season: trimmedSeason,
+          defaultPrice: parsedPrice,
+          active: true,
+          imageUrl: formValues.imageUrl.trim() || null,
+        },
       });
 
       setFormValues(initialFormValues);
@@ -138,7 +137,6 @@ function ProductsPageContent() {
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
       const trimmedName = currentValue.name.trim();
       const trimmedSeason = currentValue.season.trim();
       const parsedPrice = Number(currentValue.defaultPrice);
@@ -147,14 +145,15 @@ function ProductsPageContent() {
         throw new Error("Název, sezóna a cena musí být vyplněny správně.");
       }
 
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "products", productId), {
-        name: trimmedName,
-        season: trimmedSeason,
-        defaultPrice: parsedPrice,
-        currency: "CZK",
-        active: currentValue.active,
-        imageUrl: currentValue.imageUrl.trim() || null,
-        updatedAt: firestoreApi.serverTimestamp(),
+      await callFirestoreWorker("product.update", {
+        productId,
+        product: {
+          name: trimmedName,
+          season: trimmedSeason,
+          defaultPrice: parsedPrice,
+          active: currentValue.active,
+          imageUrl: currentValue.imageUrl.trim() || null,
+        },
       });
 
       await loadProducts();
