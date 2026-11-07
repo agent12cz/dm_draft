@@ -8,8 +8,10 @@ import { PageContainer } from "@/components/PageContainer";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
+import { createDraftWithUniqueCode } from "@/lib/createDraft";
 import { buildSnakeOrder, defaultDraftItems } from "@/lib/snakeDraft";
 import AuthGuard from "@/app/auth-guard";
+import { useAuth } from "@/components/AuthProvider";
 
 type DraftStatus = "waiting" | "drafting" | "paused" | "completed";
 
@@ -109,6 +111,7 @@ function getCurrentPickLabel(draft: DraftDocument) {
 
 function HomeContent() {
   const router = useRouter();
+  const { user } = useAuth();
   const [drafts, setDrafts] = useState<DraftDocument[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -178,25 +181,16 @@ function HomeContent() {
     if (!draft.id) {
       return;
     }
+    if (!user) {
+      setError("Pro duplikaci draftu se přihlaste.");
+      return;
+    }
 
     setDuplicatingDraftId(draft.id);
     setError(null);
 
     try {
       const { db, firestoreApi } = await getFirebaseClient();
-      let draftCode = generateDraftCode();
-      let isCodeTaken = true;
-
-      while (isCodeTaken) {
-        const existingDraft = await firestoreApi.getDoc(firestoreApi.doc(db, "drafts", draftCode));
-        if (!existingDraft.exists()) {
-          isCodeTaken = false;
-          break;
-        }
-
-        draftCode = generateDraftCode();
-      }
-
       const participantCount = Number(draft.participantCount ?? 0);
       const copiedDraftItems = (draft.draftItems ?? defaultDraftItems).map((item) => ({
         id: item.id,
@@ -207,6 +201,7 @@ function HomeContent() {
       const nextAvailableItemIds = copiedDraftItems.map((item) => item.id);
 
       const duplicateDraftData = {
+        ownerUserId: user.uid,
         title: `${draft.title || "Draft"} kopie`,
         sport: draft.sport ?? "NHL",
         productId: draft.productId ?? "",
@@ -232,10 +227,9 @@ function HomeContent() {
         turnDurationSeconds: draft.turnDurationSeconds === null ? null : Number(draft.turnDurationSeconds ?? 15),
         createdAt: firestoreApi.serverTimestamp(),
         updatedAt: firestoreApi.serverTimestamp(),
-        code: draftCode,
       };
 
-      await firestoreApi.setDoc(firestoreApi.doc(db, "drafts", draftCode), duplicateDraftData);
+      const draftCode = await createDraftWithUniqueCode(db, firestoreApi, generateDraftCode, duplicateDraftData);
       router.push(`/draft/${draftCode}`);
     } catch (duplicateError) {
       console.error(duplicateError);

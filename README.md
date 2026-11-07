@@ -37,6 +37,12 @@ The shared `Navbar` uses the root `AuthProvider` for authentication on every pag
 
 On `/play/[code]`, a single chat panel stays mounted above My Teams in the secondary column, independently of the participant/history and team-selection tabs. On smaller screens the columns stack and the navigation buttons wrap. The bounded message list scrolls internally and follows new messages while the reader is near the bottom; scrolling up preserves the reading position, and sending a message resumes following. Draft updates do not reset the composer or recreate the chat's access/messages subscriptions. `npm test` includes mocked lifecycle checks for those behaviors and a structural check of the panel placement.
 
+## Administrator draw and print
+
+Before a draft starts, the administrator may draw the participant order once. A Firestore transaction saves both the shuffled participants and `participantOrderDrawn`; the five-second animation is only a local preview and interrupting it does not undo the saved result. Manual reordering remains available before the start. Older drafts without the flag are treated as not yet drawn because earlier draws were not recorded. Existing Firestore authorization rules remain responsible for restricting writes.
+
+The results print view includes the draft's saved box composition and total quantity, followed by participants and teams, without prices or margin. Legacy drafts without a `boxes` array use their saved product fields. The print layout is designed for A4.
+
 ## Automatic draft picks
 
 Expired turns are processed by a Cloudflare Cron Trigger once per minute. The custom Worker entry point in `worker.ts` preserves the OpenNext `fetch` handler and adds the scheduled handler. The Worker uses the Firestore REST API with a service-account OAuth token; its service-account JSON must be set as the `FIREBASE_SERVICE_ACCOUNT_JSON` Cloudflare Worker secret. Never commit that JSON or its private key. The account needs the `roles/datastore.user` IAM role in the Firebase project. The project ID is configured as the non-secret `FIREBASE_PROJECT_ID` Wrangler variable.

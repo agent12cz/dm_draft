@@ -33,6 +33,38 @@ assert.doesNotMatch(chat.getText(playerSource), /\bkey=|mobileTab|sidebarTab/);
 assert.doesNotMatch(readFileSync(playerPath, "utf8"), /set(?:Mobile|Sidebar)Tab\("chat"\)/);
 console.log("✓ Exactly one unconditionally mounted chat precedes My Teams outside the tab panels");
 
+const adminPath = new URL("../src/app/draft/[code]/page.tsx", import.meta.url);
+const adminSource = ts.createSourceFile(
+  adminPath.pathname, readFileSync(adminPath, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX,
+);
+assert.equal(adminSource.parseDiagnostics.length, 0);
+const adminChats = [];
+function visitAdmin(node) {
+  if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(adminSource) === "DraftChat") {
+    adminChats.push(node);
+  }
+  ts.forEachChild(node, visitAdmin);
+}
+visitAdmin(adminSource);
+assert.equal(adminChats.length, 1);
+const adminChat = adminChats[0];
+assert.equal(ts.isJsxElement(adminChat.parent), true);
+const adminChatCard = adminChat.parent;
+assert.equal(ts.isJsxElement(adminChatCard.parent), true);
+const adminTopGrid = adminChatCard.parent;
+assert.match(adminTopGrid.openingElement.getText(adminSource), /xl:grid-cols/);
+const adminTopPanels = adminTopGrid.children.filter((node) =>
+  ts.isJsxElement(node) && node.openingElement.tagName.getText(adminSource) === "Card",
+);
+assert.equal(adminTopPanels.length, 3);
+assert.match(adminTopPanels[0].getText(adminSource), /Administrace draftu/);
+assert.match(adminTopPanels[1].getText(adminSource), /Draft ještě nezačal/);
+assert.equal(adminTopPanels[2], adminChatCard);
+assert.match(adminChat.getText(adminSource), /isEmbedded/);
+assert.match(adminChat.getText(adminSource), /h-80/);
+assert.doesNotMatch(adminTopGrid.getText(adminSource), /<details/);
+console.log("✓ Admin chat is always mounted once in the bounded top panel beside the draft controls and turn");
+
 const slots = [];
 const effects = [];
 let cursor = 0;

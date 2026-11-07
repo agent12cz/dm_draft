@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
-import { buildAutomaticPickUpdate } from "../src/lib/autoPick.ts";
-import { defaultDraftItems } from "../src/lib/snakeDraft.js";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
+import {
+  buildAutomaticPickUpdate,
+  getDraftStatusAfterPick,
+} from "../src/lib/autoPick.ts";
+import {
+  buildSnakeOrder,
+  defaultDraftItems,
+  extendSnakeOrderForSkippedPick,
+} from "../src/lib/snakeDraft.js";
 import { calculateCombinedTeamRanking } from "../src/lib/rankings.js";
 import { getTimeLeftForTurn, getTurnKey } from "../src/lib/turnCountdown.ts";
 
@@ -9,6 +18,53 @@ const teams = [
   { id: "team-b", name: "Team B" },
   { id: "team-c", name: "Team C" },
 ];
+
+{
+  const source = ts.createSourceFile(
+    "PlayerDraftPage.tsx",
+    readFileSync(new URL("../src/components/PlayerDraftPage.tsx", import.meta.url), "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let saveFunction;
+  function visit(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "handleSavePriorities") saveFunction = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(saveFunction);
+  const updates = [];
+  function visitUpdates(node) {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.expression.getText(source) === "firestoreApi" && node.expression.name.text === "updateDoc") {
+      updates.push(node.arguments);
+    }
+    ts.forEachChild(node, visitUpdates);
+  }
+  visitUpdates(saveFunction);
+  assert.equal(updates.length, 1);
+  const args = updates[0];
+  assert.equal(args.length, 5);
+  assert.equal(args[1].getText(source), 'new firestoreApi.FieldPath("playerPriorities", user.uid)');
+  assert.equal(args[2].getText(source), "order");
+  assert.equal(args[3].getText(source), '"updatedAt"');
+  const result = buildAutomaticPickUpdate({
+    participants: [
+      { userId: "player-2", picks: [] },
+      { userId: "player-1", picks: [], priorities: ["team-a"] },
+    ],
+    pickOrder: [1],
+    currentPickIndex: 0,
+    availableItemIds: ["team-a", "team-b"],
+    draftItems: teams,
+    history: [],
+    playerPriorities: { "player-1": ["team-b"] },
+  });
+  assert.equal(result.history[0].itemId, "team-b");
+  assert.deepEqual(result.participants.map((participant) => participant.userId), ["player-2", "player-1"]);
+  console.log("✓ Priority writes do not replace participants, and saved priorities override legacy data");
+}
 
 function draftFixture(overrides = {}) {
   return {
@@ -22,6 +78,75 @@ function draftFixture(overrides = {}) {
     playerPriorities: {},
     ...overrides,
   };
+}
+
+{
+  const fixtures = [
+    { teamCount: 14, participantCount: 3 },
+    { teamCount: 30, participantCount: 4 },
+    { teamCount: 32, participantCount: 5 },
+  ];
+
+  for (const { teamCount, participantCount } of fixtures) {
+    const items = Array.from({ length: teamCount }, (_, index) => ({
+      id: `team-${index + 1}`,
+      name: `Team ${index + 1}`,
+    }));
+    const pickOrder = buildSnakeOrder(participantCount, teamCount);
+    const participants = Array.from({ length: participantCount }, (_, index) => ({
+      userId: `player-${index + 1}`,
+      name: `Player ${index + 1}`,
+      picks: [],
+    }));
+    let draft = draftFixture({
+      participants,
+      pickOrder,
+      currentPickIndex: 0,
+      availableItemIds: items.map((item) => item.id),
+      draftItems: items,
+      history: [],
+      teamRanking: items.map((item) => item.id),
+      playerPriorities: {},
+    });
+
+    for (let index = 0; index < teamCount; index += 1) {
+      const update = buildAutomaticPickUpdate(draft);
+      assert.ok(update);
+      assert.equal(update.history.at(-1)?.participantIndex, pickOrder[index]);
+      assert.equal(update.status, index === teamCount - 1 ? "completed" : "drafting");
+      draft = { ...draft, ...update };
+    }
+
+    assert.equal(draft.currentPickIndex, teamCount);
+    assert.deepEqual(draft.availableItemIds, []);
+    assert.equal(draft.history.length, teamCount);
+    assert.equal(new Set(draft.history.map((entry) => entry.itemId)).size, teamCount);
+    assert.equal(
+      getDraftStatusAfterPick(items.slice(1).map((item) => item.id)),
+      "drafting",
+    );
+    let remainingItems = items.map((item) => item.id);
+    for (let index = 0; index < teamCount; index += 1) {
+      remainingItems = remainingItems.slice(1);
+      assert.equal(
+        getDraftStatusAfterPick(remainingItems),
+        index === teamCount - 1 ? "completed" : "drafting",
+      );
+    }
+  }
+
+  assert.deepEqual(buildSnakeOrder(3, 8), [0, 1, 2, 2, 1, 0, 0, 1]);
+  const shortOrder = buildSnakeOrder(3, 14);
+  const extendedOrder = buildSnakeOrder(3, 15);
+  assert.deepEqual(extendedOrder.slice(0, shortOrder.length), shortOrder);
+  assert.equal(extendedOrder.at(-1), 2);
+  const afterSkippedPick = extendSnakeOrderForSkippedPick(shortOrder, 3, 13, 1);
+  assert.deepEqual(afterSkippedPick, extendedOrder);
+  assert.equal(
+    extendSnakeOrderForSkippedPick(shortOrder, 3, 0, 14).length,
+    15,
+  );
+  console.log("✓ Drafts with 14, 30 and 32 teams keep snake order and finish on the actual last team");
 }
 
 {

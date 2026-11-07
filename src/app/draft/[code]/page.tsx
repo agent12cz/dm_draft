@@ -1,17 +1,24 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
-import { normalizeDraftItem } from "@/lib/snakeDraft";
+import { getDraftStatusAfterPick } from "@/lib/autoPick";
+import {
+  extendSnakeOrderForSkippedPick,
+  normalizeDraftItem,
+} from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import AuthGuard from "@/app/auth-guard";
 import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
+import { animateParticipantDraw, drawParticipantOrder, ParticipantDrawError } from "@/lib/participantDraw";
+import { startDraft, StartDraftError } from "@/lib/startDraft";
+import { commitParticipantUpdate, ParticipantUpdateConflict } from "@/lib/participantUpdate";
 
 type DraftParticipant = {
   id: string;
@@ -63,6 +70,7 @@ type Draft = {
   sport: string;
   code: string;
   status: string;
+  createdAt?: unknown;
   productName: string;
   productSeason: string;
   productPrice: number;
@@ -83,9 +91,14 @@ type Draft = {
   boxes?: DraftBox[];
   teamRanking?: string[];
   teamRankingLocked?: boolean;
+  participantOrderDrawn?: boolean;
 };
 
 type TurnDurationOption = "none" | "10" | "15" | "20" | "30" | "45" | "60" | "custom";
+
+function participantUpdateMessage(error: unknown, fallback: string) {
+  return error instanceof ParticipantUpdateConflict ? error.message : fallback;
+}
 
 const TURN_DURATION_OPTIONS: Array<{ value: TurnDurationOption; label: string }> = [
   { value: "none", label: "Bez limitu" },
@@ -104,6 +117,39 @@ function formatTurnDurationLabel(turnDurationSeconds: number | null) {
   }
 
   return `${turnDurationSeconds} s`;
+}
+
+function formatDraftDate(value: unknown) {
+  let date: Date;
+  if (
+    value &&
+    typeof value === "object" &&
+    "toDate" in value &&
+    typeof value.toDate === "function"
+  ) {
+    date = value.toDate();
+  } else if (typeof value === "string" || typeof value === "number") {
+    date = new Date(value);
+  } else {
+    date = new Date();
+  }
+
+  return new Intl.DateTimeFormat("cs-CZ", { dateStyle: "long" }).format(
+    Number.isNaN(date.getTime()) ? new Date() : date,
+  );
+}
+
+function getTimestampDate(value: unknown) {
+  if (
+    value &&
+    typeof value === "object" &&
+    "toDate" in value &&
+    typeof value.toDate === "function"
+  ) {
+    return value.toDate();
+  }
+  if (value instanceof Date) return value;
+  return null;
 }
 
 function getTurnDurationOption(value: number | null): TurnDurationOption {
@@ -142,12 +188,12 @@ function DraftDetailPageContent() {
   const { user, profile } = useAuth();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [isLoading, setIsLoading] = useState(Boolean(code));
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const [participantNames, setParticipantNames] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isSavingNames, setIsSavingNames] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isSubmittingTurnAction, setIsSubmittingTurnAction] = useState(false);
-  const [isHistoryHidden, setIsHistoryHidden] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   const [draftCodeCopyFeedback, setDraftCodeCopyFeedback] = useState<string | null>(null);
   const [viewerLinkCopyFeedback, setViewerLinkCopyFeedback] = useState<string | null>(null);
@@ -179,6 +225,12 @@ function DraftDetailPageContent() {
   const [isRankingExpanded, setIsRankingExpanded] = useState(false);
   const [draggedRankIndex, setDraggedRankIndex] = useState<number | null>(null);
   const [dragOverRankIndex, setDragOverRankIndex] = useState<number | null>(null);
+  const [drawAnimation, setDrawAnimation] = useState<{
+    participants: DraftParticipant[];
+    startedAt: number | null;
+    offset: number;
+  } | null>(null);
+  const drawingRef = useRef(false);
 
   const closeReplaceDialog = useCallback(() => {
     setReplaceSelection(null);
@@ -273,6 +325,7 @@ function DraftDetailPageContent() {
                 sport: data.sport ?? "NHL",
                 code: data.code ?? code,
                 status: data.status ?? "waiting",
+                createdAt: data.createdAt,
                 productName: data.productName ?? "",
                 productSeason: data.productSeason ?? "",
                 productPrice: Number(data.productPrice ?? 0),
@@ -289,9 +342,11 @@ function DraftDetailPageContent() {
                 availableItemIds: (data.availableItemIds ?? []) as string[],
                 history: (data.history ?? []) as DraftHistoryItem[],
                 turnDurationSeconds: resolvedTurnDurationSeconds,
+                turnStartedAt: data.turnStartedAt,
                 boxes: (data.boxes ?? []) as DraftBox[],
                 teamRanking: Array.isArray(data.teamRanking) ? (data.teamRanking as string[]) : undefined,
                 teamRankingLocked: Boolean(data.teamRankingLocked || (data.status && data.status !== "waiting")),
+                participantOrderDrawn: data.participantOrderDrawn === true,
               };
 
               setDraft(draftData);
@@ -425,6 +480,11 @@ function DraftDetailPageContent() {
   const currentParticipant = draft && currentParticipantIndex !== null ? draft.participants[currentParticipantIndex] : null;
   const currentRound = draft ? Math.floor(draft.currentPickIndex / Math.max(1, draft.participantCount)) + 1 : 1;
   const currentPickNumber = draft ? draft.currentPickIndex + 1 : 1;
+  const completedPickCount = draft?.history.filter((entry) => entry.type === "pick").length ?? 0;
+  const turnStartedAtDate = getTimestampDate(draft?.turnStartedAt);
+  const remainingTurnSeconds = draft?.status === "drafting" && draft.turnDurationSeconds !== null && turnStartedAtDate
+    ? Math.max(0, Math.ceil((turnStartedAtDate.getTime() + draft.turnDurationSeconds * 1000 - clockNow) / 1000))
+    : null;
   const availableItems = useMemo(() => {
     if (!draft) {
       return [] as DraftItem[];
@@ -479,6 +539,26 @@ function DraftDetailPageContent() {
   }, [availableItems.length, draft, participantNames]);
   const canStartDraft = Boolean(draft && draft.status === "waiting" && startDraftValidationMessage === null);
   const canManageTurnAction = Boolean(draft && draft.status === "drafting" && !isSubmittingTurnAction && !isUpdating);
+
+  useEffect(() => {
+    if (drawAnimation?.startedAt == null) return;
+    return animateParticipantDraw(
+      (offset) => setDrawAnimation((current) => current ? { ...current, offset } : null),
+      () => {
+        drawingRef.current = false;
+        setDrawAnimation(null);
+      },
+    );
+  }, [drawAnimation?.startedAt]);
+
+  useEffect(() => {
+    if (draft?.status !== "drafting" || draft.turnDurationSeconds === null) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [draft?.status, draft?.turnDurationSeconds, draft?.turnStartedAt]);
 
   const historyEntries = useMemo(() => {
     if (!draft) {
@@ -573,7 +653,7 @@ function DraftDetailPageContent() {
     }
   }
 
-  async function updateDraft(updates: Partial<Draft>) {
+  async function updateDraft(updates: Pick<Draft, "status">) {
     if (!draft) {
       return;
     }
@@ -770,13 +850,12 @@ function DraftDetailPageContent() {
 
     try {
       const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+      await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
         participants: nextParticipants,
-        updatedAt: firestoreApi.serverTimestamp(),
-      });
+      }, normalizeParticipant);
     } catch (generateError) {
       console.error(generateError);
-      setError("Nepodařilo se vygenerovat PIN.");
+      setError(participantUpdateMessage(generateError, "Nepodařilo se vygenerovat PIN."));
     }
   }
 
@@ -832,14 +911,11 @@ function DraftDetailPageContent() {
       return;
     }
 
-    const { db, firestoreApi } = await getFirebaseClient();
-    const draftDocRef = firestoreApi.doc(db, "drafts", draftDocumentId);
-
     try {
-      await firestoreApi.updateDoc(draftDocRef, {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await commitParticipantUpdate(db, firestoreApi, draftDocumentId, draft, {
         participants: nextParticipants,
-        updatedAt: firestoreApi.serverTimestamp(),
-      });
+      }, normalizeParticipant, { waiting: true });
       setParticipantNames(nextParticipants.map((participant) => participant.name || participant.displayName || ""));
       setSelectedParticipantIndex(null);
       setUserSearch("");
@@ -848,7 +924,7 @@ function DraftDetailPageContent() {
       const errorCode = typeof assignError === "object" && assignError && "code" in assignError ? String((assignError as { code?: unknown }).code ?? "unknown") : "unknown";
       const errorMessage = typeof assignError === "object" && assignError && "message" in assignError ? String((assignError as { message?: unknown }).message ?? "") : "";
       console.error("ASSIGN USER ERROR", assignError);
-      setError(`Přiřazení selhalo: ${errorCode}${errorMessage ? ` – ${errorMessage}` : ""}`);
+      setError(participantUpdateMessage(assignError, `Přiřazení selhalo: ${errorCode}${errorMessage ? ` – ${errorMessage}` : ""}`));
     }
   }
 
@@ -891,10 +967,9 @@ function DraftDetailPageContent() {
 
     try {
       const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+      await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
         participants: nextParticipants,
-        updatedAt: firestoreApi.serverTimestamp(),
-      });
+      }, normalizeParticipant, { waiting: true });
       setParticipantNames(nextParticipants.map((participant) => participant.name || participant.displayName || ""));
       setSelectedParticipantIndex(null);
       setUserSearch("");
@@ -903,7 +978,7 @@ function DraftDetailPageContent() {
       const errorCode = typeof removeError === "object" && removeError && "code" in removeError ? String((removeError as { code?: unknown }).code ?? "unknown") : "unknown";
       const errorMessage = typeof removeError === "object" && removeError && "message" in removeError ? String((removeError as { message?: unknown }).message ?? "") : "";
       console.error("ASSIGN USER ERROR", removeError);
-      setError(`Odebrání uživatele selhalo: ${errorCode}${errorMessage ? ` – ${errorMessage}` : ""}`);
+      setError(participantUpdateMessage(removeError, `Odebrání uživatele selhalo: ${errorCode}${errorMessage ? ` – ${errorMessage}` : ""}`));
     }
   }
 
@@ -958,23 +1033,26 @@ function DraftDetailPageContent() {
           displayName: participant.displayName ?? participant.name ?? nextDisplayName,
           name: participant.name || participant.displayName || nextDisplayName,
           email: user.email ?? participant.email ?? "",
-          joinedAt: firestoreApi.serverTimestamp(),
+          joinedAt: new Date(),
           pickCount: participant.pickCount ?? participant.picks?.length ?? 0,
           status: "ready" as const,
         };
       });
 
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draftDocument.id), {
+      await commitParticipantUpdate(db, firestoreApi, draftDocument.id, {
+        participants,
+        status: draftData.status ?? "waiting",
+        participantOrderDrawn: draftData.participantOrderDrawn,
+      }, {
         participants: nextParticipants,
-        updatedAt: firestoreApi.serverTimestamp(),
-      });
+      }, normalizeParticipant, { waiting: true });
 
       setJoinMessage("Připojili jste se k draftu.");
       setJoinDraftCode("");
       setJoinModalOpen(false);
     } catch (joinError) {
       console.error(joinError);
-      setJoinMessage("Nepodařilo se připojit k draftu.");
+      setJoinMessage(participantUpdateMessage(joinError, "Nepodařilo se připojit k draftu."));
     } finally {
       setIsJoiningDraft(false);
     }
@@ -995,13 +1073,12 @@ function DraftDetailPageContent() {
         name: participantNames[index]?.trim() ?? "",
       }));
 
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+      await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
         participants: nextParticipants,
-        updatedAt: firestoreApi.serverTimestamp(),
-      });
+      }, normalizeParticipant, { waiting: true });
     } catch (saveError) {
       console.error(saveError);
-      setError("Nepodařilo se uložit jména účastníků.");
+      setError(participantUpdateMessage(saveError, "Nepodařilo se uložit jména účastníků."));
     } finally {
       setIsSavingNames(false);
     }
@@ -1069,18 +1146,13 @@ function DraftDetailPageContent() {
             ? ensureAllTeamsInOrder(draft.teamRanking)
             : draft.draftItems.map((item) => item.id);
 
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
-        participants: nextParticipants,
-        status: "drafting",
-        turnDurationSeconds: draft.turnDurationSeconds,
-        turnStartedAt: firestoreApi.serverTimestamp(),
-        updatedAt: firestoreApi.serverTimestamp(),
-        teamRanking: finalTeamRanking,
-        teamRankingLocked: true,
-      });
+      await startDraft(
+        db, firestoreApi, draft.id, draft.participants, participantNames,
+        finalTeamRanking, draft.teamRanking, normalizeParticipant,
+      );
     } catch (startError) {
       console.error(startError);
-      setError("Nepodařilo se spustit draft.");
+      setError(startError instanceof StartDraftError ? startError.message : "Nepodařilo se spustit draft.");
     } finally {
       setIsUpdating(false);
     }
@@ -1122,6 +1194,7 @@ function DraftDetailPageContent() {
 
         const latestData = latestSnapshot.data();
         const latestStatus = latestData.status ?? "waiting";
+        const latestParticipants = (latestData.participants ?? []) as DraftParticipant[];
         const latestPickOrder = (latestData.pickOrder ?? []) as number[];
         const latestCurrentPickIndex = Number(latestData.currentPickIndex ?? 0);
         const latestAvailableItemIds = (latestData.availableItemIds ?? []) as string[];
@@ -1143,10 +1216,13 @@ function DraftDetailPageContent() {
         }
 
         const nextPickIndex = latestCurrentPickIndex + 1;
-        const nextStatus =
-          nextPickIndex >= latestPickOrder.length || latestAvailableItemIds.length === 0
-            ? "completed"
-            : "drafting";
+        const nextPickOrder = extendSnakeOrderForSkippedPick(
+          latestPickOrder,
+          latestParticipants.length,
+          latestCurrentPickIndex,
+          latestAvailableItemIds.length,
+        );
+        const nextStatus = getDraftStatusAfterPick(latestAvailableItemIds);
         const nextHistory = [
           ...latestHistory,
           {
@@ -1158,6 +1234,7 @@ function DraftDetailPageContent() {
         const nextDraftUpdate = {
           status: nextStatus,
           currentPickIndex: nextPickIndex,
+          pickOrder: nextPickOrder,
           history: nextHistory,
           updatedAt: firestoreApi.serverTimestamp(),
         } as Record<string, unknown>;
@@ -1229,10 +1306,7 @@ function DraftDetailPageContent() {
 
         const nextPickIndex = latestCurrentPickIndex + 1;
         const nextAvailableItemIds = latestAvailableItemIds.filter((availableItemId) => availableItemId !== item.id);
-        const nextStatus =
-          nextPickIndex >= latestPickOrder.length || nextAvailableItemIds.length === 0
-            ? "completed"
-            : "drafting";
+        const nextStatus = getDraftStatusAfterPick(nextAvailableItemIds);
         const nextParticipants = latestParticipants.map((participant, index) =>
           index === latestCurrentParticipantIndex ? { ...participant, picks: [...participant.picks, item.id] } : participant,
         );
@@ -1309,13 +1383,23 @@ function DraftDetailPageContent() {
       nextAvailableItemIds = [...draft.availableItemIds, lastAction.itemId];
     }
 
-    await updateDraft({
-      status: "drafting",
-      participants: nextParticipants,
-      currentPickIndex: previousPickIndex,
-      availableItemIds: nextAvailableItemIds,
-      history: updatedHistory,
-    });
+    setIsUpdating(true);
+    setError(null);
+    try {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
+        status: "drafting",
+        participants: nextParticipants,
+        currentPickIndex: previousPickIndex,
+        availableItemIds: nextAvailableItemIds,
+        history: updatedHistory,
+      }, normalizeParticipant, { checkTurn: true });
+    } catch (undoError) {
+      console.error(undoError);
+      setError(participantUpdateMessage(undoError, "Nepodařilo se vrátit poslední tah."));
+    } finally {
+      setIsUpdating(false);
+    }
   }
 
   function openReplaceDialog(participantIndex: number, participantName: string, currentItemId: string, currentItemName: string, currentPickIndex: number) {
@@ -1365,7 +1449,8 @@ function DraftDetailPageContent() {
         nextAvailableItemIds.push(replaceSelection.currentItemId);
       }
 
-      await updateDraft({
+      const { db, firestoreApi } = await getFirebaseClient();
+      await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
         participants: nextParticipants,
         availableItemIds: nextAvailableItemIds,
         history: [
@@ -1379,13 +1464,13 @@ function DraftDetailPageContent() {
             newItemName: replacementItem?.name ?? replacementItemId,
           },
         ],
-      });
+      }, normalizeParticipant, { checkTurn: true });
 
       setReplaceSelection(null);
       setReplacementItemId(null);
     } catch (replaceError) {
       console.error(replaceError);
-      setReplaceError("Nepodařilo se změnit tým.");
+      setReplaceError(participantUpdateMessage(replaceError, "Nepodařilo se změnit tým."));
     } finally {
       setIsReplacingItem(false);
     }
@@ -1413,45 +1498,49 @@ function DraftDetailPageContent() {
     const [participant] = nextParticipants.splice(index, 1);
     nextParticipants.splice(nextIndex, 0, participant);
 
-    setParticipantNames(nextParticipants.map((participant) => participant.name));
     void (async () => {
       try {
         const { db, firestoreApi } = await getFirebaseClient();
-        await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
+        await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
           participants: nextParticipants,
-          updatedAt: firestoreApi.serverTimestamp(),
-        });
+        }, normalizeParticipant, { reorder: true });
+        setParticipantNames(nextParticipants.map((participant) => participant.name));
       } catch (moveError) {
         console.error(moveError);
-        setError("Nepodařilo se změnit pořadí účastníků.");
+        setError(participantUpdateMessage(moveError, "Nepodařilo se změnit pořadí účastníků."));
       }
     })();
   }
 
-  function shuffleParticipants() {
-    if (!draft) {
+  async function shuffleParticipants() {
+    if (!draft || draft.status !== "waiting" || draft.participantOrderDrawn || drawingRef.current || isUpdating || isSavingNames) return;
+    if (participantNames.some((name, index) => name.trim() !== draft.participants[index]?.name)) {
+      setError("Před losováním uložte změněná jména účastníků.");
       return;
     }
 
-    const nextParticipants = [...draft.participants];
-    for (let index = nextParticipants.length - 1; index > 0; index -= 1) {
-      const randomIndex = Math.floor(Math.random() * (index + 1));
-      [nextParticipants[index], nextParticipants[randomIndex]] = [nextParticipants[randomIndex], nextParticipants[index]];
+    drawingRef.current = true;
+    setError(null);
+    setSelectedParticipantIndex(null);
+    setDrawAnimation({ participants: draft.participants, startedAt: null, offset: 0 });
+    try {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await drawParticipantOrder(db, firestoreApi, draft.id, draft.participants, normalizeParticipant);
+      setDrawAnimation((current) => current ? { ...current, startedAt: Date.now() } : null);
+    } catch (shuffleError) {
+      console.error("Participant draw failed", shuffleError);
+      const message = shuffleError instanceof ParticipantDrawError
+        ? {
+            "already-drawn": "Pořadí již bylo vylosováno.",
+            "not-waiting": "Draft již byl spuštěn; pořadí nelze losovat.",
+            "participants-changed": "Účastníci se mezitím změnili. Zkontrolujte jejich pořadí a zkuste to znovu.",
+            "not-found": "Draft nebyl nalezen.",
+          }[shuffleError.reason]
+        : "Nepodařilo se náhodně vylosovat pořadí účastníků.";
+      setError(message);
+      drawingRef.current = false;
+      setDrawAnimation(null);
     }
-
-    setParticipantNames(nextParticipants.map((participant) => participant.name));
-    void (async () => {
-      try {
-        const { db, firestoreApi } = await getFirebaseClient();
-        await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
-          participants: nextParticipants,
-          updatedAt: firestoreApi.serverTimestamp(),
-        });
-      } catch (shuffleError) {
-        console.error(shuffleError);
-        setError("Nepodařilo se náhodně vylosovat pořadí účastníků.");
-      }
-    })();
   }
 
   if (isLoading) {
@@ -1476,7 +1565,7 @@ function DraftDetailPageContent() {
 
   if (!draft) {
     return (
-      <div className="min-h-screen text-slate-100">
+      <div className="print-draft-page min-h-screen text-slate-100">
         <Navbar />
         <PageContainer className="py-8 lg:py-10">
           <div className="mx-auto flex max-w-6xl flex-col gap-6">
@@ -1494,121 +1583,292 @@ function DraftDetailPageContent() {
     );
   }
 
+  const isDraftWaiting = draft.status === "waiting";
+  const breakComposition = draft.boxes?.length
+    ? draft.boxes
+    : [{
+        productName: draft.productName,
+        productSeason: draft.productSeason,
+        boxCount: draft.boxCount,
+        boxPrice: draft.boxPrice,
+        productImageUrl: draft.productImageUrl,
+      }];
+  const totalBreakBoxCount = breakComposition.reduce((total, box) => total + box.boxCount, 0);
+  const breakBoxCountLabel = totalBreakBoxCount === 1
+    ? "box"
+    : totalBreakBoxCount % 10 >= 2 && totalBreakBoxCount % 10 <= 4 && (totalBreakBoxCount % 100 < 12 || totalBreakBoxCount % 100 > 14)
+      ? "boxy"
+      : "boxů";
+
   return (
     <div className="min-h-screen text-slate-100">
       <Navbar />
-      <PageContainer className="py-8 lg:py-10">
-        <div className="mx-auto flex max-w-7xl flex-col gap-6">
-          <Card className="space-y-6">
-            <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-              <div className="space-y-3">
-                <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">
-                  Snake draft
+      <PageContainer className={isDraftWaiting ? "py-4 lg:py-6" : "py-8 lg:py-10"}>
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 print:hidden">
+          <div className="grid items-start gap-3 lg:grid-cols-2 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)]">
+          <Card className="min-w-0 space-y-3 !p-4 sm:!p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[#18C964]">
+                  {draft.sport} · Administrace draftu
                 </p>
-                <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+                <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-white sm:text-3xl">
                   {draft.title}
                 </h1>
-                <p className="text-lg text-slate-400">{draft.sport}</p>
-                <p className="text-sm font-medium uppercase tracking-[0.25em] text-slate-400">
-                  Stav: {draft.status}
-                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-slate-300">
+                  Kód <strong className="ml-1 font-mono tracking-widest text-[#8ef0b5]">{draft.code}</strong>
+                </span>
+                <span className={`rounded-full border px-3 py-1.5 font-semibold ${
+                  draft.status === "drafting"
+                    ? "border-[#18C964]/30 bg-[#18C964]/10 text-[#8ef0b5]"
+                    : draft.status === "paused"
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                      : draft.status === "completed"
+                        ? "border-slate-600 bg-slate-800 text-slate-200"
+                        : "border-slate-700 bg-slate-900 text-slate-300"
+                }`}>
+                  {draft.status === "drafting" ? "Probíhá" : draft.status === "paused" ? "Pozastaven" : draft.status === "completed" ? "Dokončen" : "Čeká na start"}
+                </span>
+                <span className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-slate-300">
+                  {draft.status === "completed"
+                    ? `Výběry ${completedPickCount}/${draft.draftItems.length}`
+                    : `Tah ${currentPickNumber}/${draft.pickOrder.length}`}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {draft.status === "waiting" ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleStartDraft()}
+                    disabled={isUpdating || Boolean(drawAnimation) || !canStartDraft}
+                    className="rounded-xl bg-[#18C964] px-3.5 py-2 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Spustit draft
+                  </button>
+                ) : null}
+                {draft.status === "drafting" ? (
+                  <button
+                    type="button"
+                    onClick={() => void handlePauseDraft()}
+                    disabled={isUpdating}
+                    className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-60"
+                  >
+                    Pozastavit
+                  </button>
+                ) : null}
+                {draft.status === "paused" ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleContinueDraft()}
+                    disabled={isUpdating}
+                    className="rounded-xl bg-[#18C964] px-3.5 py-2 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a] disabled:opacity-60"
+                  >
+                    Pokračovat
+                  </button>
+                ) : null}
+                {draft.status === "waiting" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setJoinDraftCode(draft.code);
+                      setJoinMessage(null);
+                      setJoinModalOpen(true);
+                    }}
+                    className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                  >
+                    Připojit se k draftu
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="rounded-xl border border-[#18C964]/30 bg-[#18C964]/10 px-3 py-2 text-sm font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20"
+                >
+                  Tisk
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyResults()}
+                  className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  Kopírovat výsledky
+                </button>
               </div>
 
-              <div className="flex flex-col gap-3 rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
-                <div>
-                  <p className="text-sm text-slate-400">Kód draftu</p>
-                  <p className="text-2xl font-semibold tracking-[0.3em] text-[#18C964]">{draft.code}</p>
-                </div>
-                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Čas na výběr</p>
-                  <p className="mt-1 text-sm font-semibold text-white">Čas na výběr: {formatTurnDurationLabel(draft.turnDurationSeconds)}</p>
-
-                  <div className="mt-3 grid gap-2">
-                    <select
-                      value={turnDurationOption}
-                      onChange={(event) => void handleTurnDurationOptionChange(event.target.value as TurnDurationOption)}
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-400">
+                  Čas na výběr
+                  <select
+                    value={turnDurationOption}
+                    onChange={(event) => void handleTurnDurationOptionChange(event.target.value as TurnDurationOption)}
+                    disabled={isSettingsLocked}
+                    className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-white disabled:opacity-60"
+                  >
+                    {TURN_DURATION_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+                {turnDurationOption === "custom" ? (
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      min="5"
+                      max="300"
+                      value={customTurnDurationSeconds}
+                      onChange={(event) => setCustomTurnDurationSeconds(event.target.value)}
                       disabled={isSettingsLocked}
-                      className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-[#18C964]/50 disabled:cursor-not-allowed disabled:opacity-60"
+                      aria-label="Vlastní čas na výběr v sekundách"
+                      className="w-20 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-white disabled:opacity-60"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveCustomTurnDuration()}
+                      disabled={isSettingsLocked}
+                      className="rounded-lg border border-slate-700 px-2 py-1.5 text-xs text-slate-200 disabled:opacity-60"
                     >
-                      {TURN_DURATION_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                      Uložit
+                    </button>
+                  </div>
+                ) : null}
+                <span className="text-xs text-slate-400">Aktuálně: {formatTurnDurationLabel(draft.turnDurationSeconds)}</span>
+                <Link
+                  href={`/view/${draft.code}`}
+                  className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  Viewer
+                </Link>
+                <button type="button" onClick={() => void handleCopyDraftCode()} className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">Kopírovat kód</button>
+                <button type="button" onClick={() => void handleCopyViewerLink()} className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">Viewer odkaz</button>
+                <button type="button" onClick={() => void handleCopyPlayerLink()} className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">Hráčský odkaz</button>
+              </div>
+            </div>
 
-                    {turnDurationOption === "custom" ? (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <input
-                          type="number"
-                          min="5"
-                          max="300"
-                          value={customTurnDurationSeconds}
-                          onChange={(event) => setCustomTurnDurationSeconds(event.target.value)}
-                          disabled={isSettingsLocked}
-                          className="w-32 rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-[#18C964]/50 disabled:cursor-not-allowed disabled:opacity-60"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => void handleSaveCustomTurnDuration()}
-                          disabled={isSettingsLocked}
-                          className="rounded-xl border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-2 text-sm font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Uložit
-                        </button>
+            {error || startDraftMessage || joinMessage || copyFeedback || draftCodeCopyFeedback || viewerLinkCopyFeedback || playerLinkCopyFeedback ? (
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                {[error, startDraftMessage, joinMessage, copyFeedback, draftCodeCopyFeedback, viewerLinkCopyFeedback, playerLinkCopyFeedback]
+                  .filter((message): message is string => Boolean(message))
+                  .map((message) => (
+                    <p key={message} className={message.includes("nepodařilo") || message.includes("Nepodařilo") ? "text-red-300" : "text-[#8ef0b5]"}>{message}</p>
+                  ))}
+              </div>
+            ) : null}
+          </Card>
+
+          <Card className="min-w-0 !p-4 sm:!p-5">
+            <div
+              className={`rounded-2xl border ${draft.status === "waiting" ? "p-3" : "p-4"} ${
+                draft.status === "paused"
+                  ? "border-orange-500/40 bg-orange-500/10"
+                  : draft.status === "completed"
+                    ? "border-slate-700 bg-slate-950/70"
+                    : "border-[#18C964]/40 bg-[#18C964]/10"
+              }`}
+            >
+              <div className={draft.status === "waiting" ? "space-y-1.5" : "space-y-3"}>
+                <p
+                  className={`text-sm font-semibold uppercase tracking-[0.3em] ${
+                    draft.status === "paused"
+                      ? "text-orange-300"
+                      : draft.status === "completed"
+                        ? "text-slate-300"
+                        : "text-[#8ef0b5]"
+                  }`}
+                >
+                  {draft.status === "waiting" ? "PŘED ZAHÁJENÍM" : draft.status === "paused" ? "DRAFT JE POZASTAVEN" : draft.status === "completed" ? "DRAFT DOKONČEN" : "NA TAHU"}
+                </p>
+                {draft.status === "completed" ? (
+                  <>
+                    <h2 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+                      Draft dokončen
+                    </h2>
+                    <p className="text-sm text-slate-300">Všechny týmy byly rozděleny.</p>
+                    <div className="flex flex-wrap gap-3 text-sm text-slate-300">
+                      <span className="rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1">
+                        Dokončené výběry: {completedPickCount} z {draft.draftItems.length}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <h2 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">
+                      {draft.status === "waiting" ? "Draft ještě nezačal" : currentParticipant?.name || "Čeká se na účastníka"}
+                    </h2>
+                    {draft.status === "waiting" ? (
+                      <p className="text-sm text-slate-300">Draft čeká na spuštění administrátorem.</p>
+                    ) : null}
+                    {draft.status !== "waiting" ? (
+                      <div className="flex flex-wrap gap-3 text-sm text-slate-300">
+                        <span className="rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1">Kolo {currentRound}</span>
+                        <span className="rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1">Tah {currentPickNumber} z {draft.pickOrder.length}</span>
+                        <span className="rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1">Zbývá týmů: {availableItems.length}</span>
                       </div>
                     ) : null}
+                  </>
+                )}
+
+                {draft.status !== "waiting" ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Časomíra</span>
+                  <span className={`font-mono text-lg font-bold ${
+                    draft.status === "drafting" && remainingTurnSeconds === 0
+                      ? "text-amber-300"
+                      : "text-[#8ef0b5]"
+                  }`}>
+                    {draft.status === "completed"
+                      ? "Zastavena"
+                      : draft.status === "paused"
+                        ? "Pozastavena"
+                        : draft.status !== "drafting"
+                          ? "Čeká na start"
+                          : draft.turnDurationSeconds === null
+                            ? "Bez limitu"
+                            : `${remainingTurnSeconds ?? draft.turnDurationSeconds} s`}
+                  </span>
+                  {draft.status === "completed" ? (
+                    <span className="text-xs text-slate-400">{completedPickCount} z {draft.draftItems.length} výběrů</span>
+                  ) : null}
+                </div> : null}
+
+                {draft.status !== "waiting" ? (
+                  <div className="rounded-2xl border border-slate-800/80 bg-slate-950/70 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">
+                      {draft.status === "completed" ? "Poslední vybraný tým" : "Poslední výběr"}
+                    </p>
+                    {lastPickEntry && lastPickParticipant ? (
+                      <div className="mt-3 flex items-center gap-3">
+                        {lastPickItem ? <TeamLogo item={lastPickItem} className="h-8 w-8" /> : null}
+                        <div>
+                          <p className="text-sm font-semibold text-white">{lastPickParticipant.name} vybral</p>
+                          <p className="text-sm text-slate-300">{lastPickItem?.name ?? lastPickEntry.itemName ?? "Neznámý tým"}</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-sm text-slate-400">Draft zatím nemá žádný výběr.</p>
+                    )}
                   </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Link
-                    href={`/view/${draft.code}`}
-                    className="inline-flex items-center justify-center rounded-2xl border border-[#18C964]/20 bg-[#18C964]/10 px-4 py-2 text-sm font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20"
-                  >
-                    Otevřít viewer
-                  </Link>
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyDraftCode()}
-                    className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
-                  >
-                    Kopírovat kód
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyViewerLink()}
-                    className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
-                  >
-                    Kopírovat viewer odkaz
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyPlayerLink()}
-                    className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
-                  >
-                    Kopírovat hráčský odkaz
-                  </button>
-                </div>
-                {draftCodeCopyFeedback ? (
-                  <p className={`text-sm ${draftCodeCopyFeedback.includes("nepodařilo") ? "text-red-300" : "text-[#8ef0b5]"}`}>
-                    {draftCodeCopyFeedback}
-                  </p>
-                ) : null}
-                {viewerLinkCopyFeedback ? (
-                  <p className={`text-sm ${viewerLinkCopyFeedback.includes("nepodařilo") ? "text-red-300" : "text-[#8ef0b5]"}`}>
-                    {viewerLinkCopyFeedback}
-                  </p>
-                ) : null}
-                {playerLinkCopyFeedback ? (
-                  <p className={`text-sm ${playerLinkCopyFeedback.includes("nepodařilo") ? "text-red-300" : "text-[#8ef0b5]"}`}>
-                    {playerLinkCopyFeedback}
-                  </p>
                 ) : null}
               </div>
             </div>
           </Card>
+          <Card className="min-w-0 space-y-3 !p-4 sm:!p-5 lg:col-span-2 xl:col-span-1">
+            <h2 className="text-lg font-semibold text-white">Chat draftu</h2>
+            <DraftChat
+              draftId={draft.id}
+              draftCode={draft.code}
+              currentUser={user}
+              currentUserRole={profile?.role ?? null}
+              isEmbedded
+              className="h-80 min-h-0 min-w-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-950/70"
+            />
+          </Card>
+          </div>
 
-          <Card className="space-y-5">
+          <Card className="space-y-4 !p-4 sm:!p-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div>
                 <h2 className="text-2xl font-semibold text-white">Účastníci</h2>
@@ -1617,102 +1877,50 @@ function DraftDetailPageContent() {
                   <p className="mt-2 text-sm text-slate-500">Nastavení je po spuštění draftu uzamčeno.</p>
                 ) : null}
               </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setJoinDraftCode(draft.code);
-                    setJoinMessage(null);
-                    setJoinModalOpen(true);
-                  }}
-                  className="rounded-2xl border border-[#18C964]/20 bg-[#18C964]/10 px-4 py-2 text-sm font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20"
-                >
-                  Připojit se k draftu
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleStartDraft()}
-                  disabled={isUpdating || !canStartDraft}
-                  className="rounded-2xl border border-[#18C964]/20 bg-[#18C964]/10 px-4 py-2 text-sm font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  Spustit draft
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handlePauseDraft()}
-                  disabled={isUpdating}
-                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  Pozastavit draft
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleContinueDraft()}
-                  disabled={isUpdating}
-                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  Pokračovat
-                </button>
-              </div>
+              <p className="text-sm text-slate-400">
+                {draft.participants.length} účastnických pozic · {completedPickCount} provedených výběrů
+              </p>
             </div>
 
-            {error ? (
-              <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-                {error}
+            {drawAnimation ? (
+              <div aria-live="polite" className="text-sm font-semibold text-[#8ef0b5]">
+                {drawAnimation.startedAt === null ? "Ukládám vylosované pořadí…" : "Losování pořadí probíhá…"}
               </div>
+            ) : draft.participantOrderDrawn ? (
+              <p className="text-sm font-semibold text-[#8ef0b5]">Pořadí vylosováno</p>
             ) : null}
-
-            {startDraftMessage ? (
-              <div className="rounded-2xl border border-[#18C964]/20 bg-[#18C964]/10 px-4 py-3 text-sm text-[#8ef0b5]">
-                {startDraftMessage}
-              </div>
-            ) : null}
-
-            {joinMessage ? (
-              <div className="rounded-2xl border border-[#18C964]/20 bg-[#18C964]/10 px-4 py-3 text-sm text-[#8ef0b5]">
-                {joinMessage}
-              </div>
-            ) : null}
-
-            <div className="grid gap-4 md:grid-cols-2">
-              {draft.participants.map((participant, index) => {
+            <fieldset disabled={Boolean(drawAnimation)} className="min-w-0 space-y-4">
+            <div className="grid items-start gap-2 md:grid-cols-2">
+              {(drawAnimation
+                ? drawAnimation.participants.map((_, index, participants) => participants[(index + drawAnimation.offset) % participants.length])
+                : draft.participants).map((participant, index) => {
                 const isCurrentTurn = currentParticipant?.id === participant.id;
-                const participantStatusLabel = participant.status === "ready" ? "Připojen" : isCurrentTurn ? "Na tahu" : "Rezervováno";
+                const participantStatusLabel = participant.status === "ready"
+                  ? "Připojen"
+                  : isCurrentTurn && !isDraftWaiting
+                    ? "Na tahu"
+                    : isDraftWaiting
+                      ? "Čeká na připojení"
+                      : "Rezervováno";
                 const participantStatusClass = participant.status === "ready"
                   ? "border-[#18C964]/20 bg-[#18C964]/10 text-[#8ef0b5]"
-                  : isCurrentTurn
+                  : isCurrentTurn && !isDraftWaiting
                     ? "border-orange-500/20 bg-orange-500/10 text-orange-300"
                     : "border-slate-700 bg-slate-900/70 text-slate-300";
 
                 return (
-                <div key={participant.id} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium uppercase tracking-[0.2em] text-slate-500">Účastník {index + 1}</p>
-                      <p className="mt-1 text-lg font-semibold text-white">{participant.displayName || participant.name || `Účastník ${index + 1}`}</p>
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => moveParticipant(index, -1)}
-                        disabled={isSettingsLocked}
-                        className="rounded-xl border border-slate-700 px-2 py-1 text-sm text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        ↑
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveParticipant(index, 1)}
-                        disabled={isSettingsLocked}
-                        className="rounded-xl border border-slate-700 px-2 py-1 text-sm text-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        ↓
-                      </button>
-                    </div>
-                  </div>
-                  <div className={`mt-3 inline-flex w-fit items-center rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${participantStatusClass}`}>
-                    {participantStatusLabel}
-                  </div>
+                <div key={participant.id} className={`rounded-xl border p-3 ${isCurrentTurn ? "border-[#18C964]/40 bg-[#18C964]/5" : "border-slate-800 bg-slate-950/70"}`}>
+                  <div className="flex items-start gap-2">
+                    <details className="min-w-0 flex-1">
+                      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 [&::-webkit-details-marker]:hidden">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-300">{index + 1}</span>
+                        <span className="min-w-0 flex-1 truncate font-semibold text-white">{participant.displayName || participant.name || `Účastník ${index + 1}`}</span>
+                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${participantStatusClass}`}>
+                          {participantStatusLabel}
+                        </span>
+                        <span className="whitespace-nowrap text-xs text-slate-400">{participant.picks.length} týmů</span>
+                      </summary>
+                      <div className="mt-3 space-y-3 border-t border-slate-800 pt-3">
                   <input
                     value={participantNames[index] ?? ""}
                     onChange={(event) => updateParticipantName(index, event.target.value)}
@@ -1810,7 +2018,29 @@ function DraftDetailPageContent() {
                       Vygenerovat PIN
                     </button>
                   </div>
-                  <p className="mt-2 text-sm text-slate-500">Počet týmů: {participant.picks.length}</p>
+                      </div>
+                    </details>
+                    <div className="flex shrink-0 gap-1">
+                      <button
+                        type="button"
+                        aria-label={`Posunout účastníka ${index + 1} nahoru`}
+                        onClick={() => moveParticipant(index, -1)}
+                        disabled={isSettingsLocked || draft.participantOrderDrawn || index === 0}
+                        className="rounded-lg border border-slate-700 px-2 py-1 text-sm text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Posunout účastníka ${index + 1} dolů`}
+                        onClick={() => moveParticipant(index, 1)}
+                        disabled={isSettingsLocked || draft.participantOrderDrawn || index === draft.participants.length - 1}
+                        className="rounded-lg border border-slate-700 px-2 py-1 text-sm text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        ↓
+                      </button>
+                    </div>
+                  </div>
                 </div>
                 );
               })}
@@ -1828,25 +2058,13 @@ function DraftDetailPageContent() {
               <button
                 type="button"
                 onClick={() => shuffleParticipants()}
-                disabled={isUpdating || isSettingsLocked}
+                disabled={isUpdating || isSavingNames || isSettingsLocked || draft.participantOrderDrawn}
                 className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
               >
-                Náhodně vylosovat pořadí
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleCopyResults()}
-                className="rounded-2xl border border-[#18C964]/20 bg-[#18C964]/10 px-4 py-2 text-sm font-semibold text-[#8ef0b5] transition hover:bg-[#18C964]/20"
-              >
-                Zkopírovat výsledky
+                {draft.participantOrderDrawn ? "Pořadí vylosováno" : "Náhodně vylosovat pořadí"}
               </button>
             </div>
-
-            {copyFeedback ? (
-              <p className={`text-sm ${copyFeedback.includes("nepodařilo") ? "text-red-300" : "text-[#8ef0b5]"}`}>
-                {copyFeedback}
-              </p>
-            ) : null}
+            </fieldset>
           </Card>
 
           {/* ŽEBŘÍČEK ATRAKTIVITY TÝMŮ CARD */}
@@ -1888,7 +2106,9 @@ function DraftDetailPageContent() {
                   onClick={() => setIsRankingExpanded((prev) => !prev)}
                   className="rounded-2xl border border-slate-700 bg-slate-900/80 px-3.5 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
                 >
-                  {isRankingExpanded ? "Skrýt všech 32 týmů ▲" : "Zobrazit a upravit 32 týmů ▼"}
+                  {isRankingExpanded
+                    ? `Skrýt všech ${draft.draftItems.length} týmů ▲`
+                    : `Zobrazit a upravit ${draft.draftItems.length} týmů ▼`}
                 </button>
               </div>
             </div>
@@ -1920,12 +2140,12 @@ function DraftDetailPageContent() {
               )}
             </div>
 
-            {/* Full 32 teams interactive list */}
+            {/* Full team list */}
             {isRankingExpanded && (
               <div className="mt-4 space-y-3 border-t border-slate-800 pt-4">
                 <p className="text-xs text-slate-400">
                   {isRankingLocked
-                    ? "Pořadí všech 32 týmů (po spuštění draftu již nelze měnit):"
+                    ? `Pořadí všech ${draft.draftItems.length} týmů (po spuštění draftu již nelze měnit):`
                     : "Pořadí můžete upravit přetažením myší nebo pomocí šipek ▲ / ▼. Nezapomeňte změny uložit."}
                 </p>
 
@@ -2023,61 +2243,44 @@ function DraftDetailPageContent() {
             )}
           </Card>
 
-          <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-            <Card className="space-y-5">
-              <div
-                className={`rounded-3xl border p-5 sm:p-6 ${
-                  draft.status === "paused"
-                    ? "border-orange-500/40 bg-orange-500/10"
-                    : draft.status === "completed"
-                      ? "border-slate-700 bg-slate-950/70"
-                      : "border-[#18C964]/40 bg-[#18C964]/10"
-                }`}
-              >
-                <div className="space-y-4">
-                  <p
-                    className={`text-sm font-semibold uppercase tracking-[0.3em] ${
-                      draft.status === "paused"
-                        ? "text-orange-300"
-                        : draft.status === "completed"
-                          ? "text-slate-300"
-                          : "text-[#8ef0b5]"
-                    }`}
-                  >
-                    {draft.status === "paused" ? "DRAFT JE POZASTAVEN" : draft.status === "completed" ? "DRAFT DOKONČEN" : "NA TAHU"}
-                  </p>
-                  <h2 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-                    {currentParticipant?.name || "Čeká se na účastníka"}
-                  </h2>
-                  <div className="flex flex-wrap gap-3 text-sm text-slate-300">
-                    <span className="rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1">Kolo {currentRound}</span>
-                    <span className="rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1">Tah {currentPickNumber} z {Math.max(1, draft.pickOrder.length)}</span>
-                    <span className="rounded-full border border-slate-700/80 bg-slate-900/70 px-3 py-1">Zbývá týmů: {availableItems.length}</span>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-800/80 bg-slate-950/70 p-4">
-                    <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">Poslední výběr</p>
-                    {lastPickEntry && lastPickParticipant ? (
-                      <div className="mt-3 flex items-center gap-3">
-                        {lastPickItem ? <TeamLogo item={lastPickItem} className="h-8 w-8" /> : null}
-                        <div>
-                          <p className="text-sm font-semibold text-white">
-                            {lastPickParticipant.name} vybral
-                          </p>
-                          <p className="text-sm text-slate-300">{lastPickItem?.name ?? lastPickEntry.itemName ?? "Neznámý tým"}</p>
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="mt-3 text-sm text-slate-400">Draft zatím nemá žádný výběr.</p>
-                    )}
-                  </div>
-                </div>
+          <div className={`grid items-start gap-4 ${isDraftWaiting ? "" : "xl:grid-cols-[1.1fr_0.9fr]"}`}>
+            {draft.status !== "waiting" ? (
+            <Card className="min-w-0 space-y-3 !p-4 sm:!p-5">
+              <div className="flex flex-wrap gap-2">
+                {draft.status !== "completed" ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void handleSelectItemForCurrentParticipant()}
+                      disabled={!canManageTurnAction}
+                      className="rounded-2xl bg-[#18C964] px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a] disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      Vybrat tým za aktuálního účastníka
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSkipCurrentParticipant()}
+                      disabled={!canManageTurnAction}
+                      className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      Přeskočit účastníka
+                    </button>
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => void handleUndoLastAction()}
+                  disabled={isUpdating || draft.history.length === 0}
+                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  Vrátit poslední tah
+                </button>
               </div>
-
+              {draft.status !== "completed" ? (
               <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                <p className="text-sm text-slate-400">Dostupné draftItems</p>
+                <p className="text-sm text-slate-400">Dostupné týmy</p>
                 {isSubmittingTurnAction ? <p className="mt-2 text-sm text-[#8ef0b5]">Ukládám výběr…</p> : null}
-                <div className="mt-3 grid gap-2">
+                <div className="mt-3 grid max-h-80 gap-2 overflow-y-auto overscroll-contain pr-1">
                   {availableItems.length > 0 ? (
                     availableItems.map((item) => (
                       <button
@@ -2099,159 +2302,120 @@ function DraftDetailPageContent() {
                   )}
                 </div>
               </div>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleSkipCurrentParticipant()}
-                  disabled={!canManageTurnAction}
-                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  Přeskočit účastníka
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleUndoLastAction()}
-                  disabled={isUpdating}
-                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  Vrátit poslední tah
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleSelectItemForCurrentParticipant()}
-                  disabled={!canManageTurnAction}
-                  className="rounded-2xl bg-[#18C964] px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a] disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  Vybrat tým za aktuálního účastníka
-                </button>
-              </div>
+              ) : null}
             </Card>
+            ) : null}
 
-            <div className="space-y-6">
-              <Card className="space-y-4">
-                <div>
-                  <h2 className="text-2xl font-semibold text-white">Přehled draftu</h2>
-                  <p className="text-sm text-slate-400">Průběžný přehled týmů, ceny a stavu breaku.</p>
+            <div className="min-w-0 space-y-3 self-start">
+              <Card className="space-y-3 !p-4">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className="text-lg font-semibold text-white">Přehled breaku</h2>
+                  <span className="text-xs text-slate-400">{totalBreakBoxCount} {breakBoxCountLabel} celkem</span>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                    <p className="text-sm text-slate-400">Box</p>
-                    <p className="mt-2 text-lg font-semibold text-white">{draft.productName}</p>
-                    <p className="text-sm text-slate-400">{draft.productSeason}</p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                    <p className="text-[11px] text-slate-400">Počet boxů</p>
+                    <p className="mt-0.5 text-sm font-semibold text-white">{totalBreakBoxCount}</p>
                   </div>
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                    <p className="text-sm text-slate-400">Cena za box</p>
-                    <p className="mt-2 text-lg font-semibold text-white">{draft.boxPrice} Kč</p>
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                    <p className="text-[11px] text-slate-400">Cena za box</p>
+                    <p className="mt-0.5 text-sm font-semibold text-white">{draft.boxPrice.toLocaleString("cs-CZ")} Kč</p>
                   </div>
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                    <p className="text-sm text-slate-400">Počet boxů</p>
-                    <p className="mt-2 text-lg font-semibold text-white">{draft.boxCount}</p>
+                  <div className="rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
+                    <p className="text-[11px] text-slate-400">Marže</p>
+                    <p className="mt-0.5 text-sm font-semibold text-white">{draft.margin.toLocaleString("cs-CZ")} Kč</p>
                   </div>
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                    <p className="text-sm text-slate-400">Marže</p>
-                    <p className="mt-2 text-lg font-semibold text-white">{draft.margin} Kč</p>
+                  <div className="rounded-lg border border-[#18C964]/20 bg-[#18C964]/5 px-3 py-2">
+                    <p className="text-[11px] text-slate-400">Cena breaku</p>
+                    <p className="mt-0.5 text-sm font-semibold text-[#8ef0b5]">{draft.targetBreakPrice.toLocaleString("cs-CZ")} Kč</p>
                   </div>
                 </div>
 
-                {draft.boxes && draft.boxes.length > 0 && (
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 space-y-2">
-                    <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                      Složení breaku ({draft.boxes.length} {draft.boxes.length === 1 ? "box" : "boxy/ů"})
-                    </p>
-                    <div className="grid gap-2">
-                      {draft.boxes.map((b, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between rounded-xl border border-slate-800/80 bg-slate-900/60 px-3 py-2 text-xs"
-                        >
-                          <div>
-                            <span className="font-bold text-white">{b.boxCount}× {b.productName}</span>
-                            <span className="ml-1 text-slate-400">({b.productSeason})</span>
-                          </div>
-                          <span className="font-semibold text-[#8ef0b5]">
-                            {b.boxPrice.toLocaleString("cs-CZ")} Kč / ks
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                  <p className="text-sm text-slate-400">Cílová cena breaku</p>
-                  <p className="mt-2 text-2xl font-semibold text-[#18C964]">{draft.targetBreakPrice} Kč</p>
-                </div>
-
-                {draft.productImageUrl ? (
-                  <div className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70">
-                    <img src={draft.productImageUrl} alt={draft.productName} className="h-56 w-full object-cover" />
-                  </div>
-                ) : null}
-              </Card>
-
-              <Card className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
-                  <h2 className="text-2xl font-semibold text-white">Vybrané týmy</h2>
-                  <button
-                    type="button"
-                    onClick={() => setIsHistoryHidden((current) => !current)}
-                    className="rounded-2xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
-                  >
-                    {isHistoryHidden ? "Zobrazit historii" : "Skrýt historii"}
-                  </button>
-                </div>
                 <div className="space-y-2">
-                  {draft.participants.some((participant) => participant.picks.length > 0) ? (
-                    draft.participants.map((participant) => (
-                      <div key={participant.id} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-sm font-semibold text-white">{participant.name || `Účastník ${draft.participants.indexOf(participant) + 1}`}</p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {participant.picks.length > 0 ? (
-                            participant.picks.map((pickedItemId, pickedIndex) => {
-                              const item = draft.draftItems.find((currentItem) => currentItem.id === pickedItemId);
-                              return (
-                                <div key={`${pickedItemId}-${pickedIndex}`} className="inline-flex items-center gap-2 rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1 text-sm text-[#8ef0b5]">
-                                  <span className="inline-flex items-center gap-2">
-                                    <TeamLogo item={item ?? null} className="h-5 w-5" />
-                                    {item?.name ?? pickedItemId}
-                                  </span>
-                                  {canReplaceSelection ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => openReplaceDialog(draft.participants.indexOf(participant), participant.name || `Účastník ${draft.participants.indexOf(participant) + 1}`, pickedItemId, item?.name ?? pickedItemId, pickedIndex)}
-                                      className="rounded-full border border-slate-700/70 bg-slate-900/80 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-300 transition hover:bg-slate-800"
-                                    >
-                                      Změnit
-                                    </button>
-                                  ) : null}
-                                </div>
-                              );
-                            })
-                          ) : (
-                            <span className="text-sm text-slate-500">Zatím žádné výběry.</span>
-                          )}
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                    Složení breaku ({totalBreakBoxCount} {breakBoxCountLabel})
+                  </p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {breakComposition.map((box, index) => (
+                      <div
+                        key={`${box.productId ?? box.productName}-${index}`}
+                        className="flex min-w-0 items-center gap-2 rounded-lg border border-slate-800/80 bg-slate-950/70 p-2"
+                      >
+                        {box.productImageUrl ? (
+                          <div className="flex h-24 w-20 shrink-0 items-center justify-center rounded border border-slate-800 bg-slate-900 p-0.5">
+                            <img
+                              src={box.productImageUrl}
+                              alt={box.productName}
+                              className="h-full w-full object-contain"
+                            />
+                          </div>
+                        ) : null}
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-semibold text-white">{box.boxCount}× {box.productName}</p>
+                          <p className="truncate text-[11px] text-slate-400">{box.productSeason}</p>
+                          <p className="text-[11px] font-medium text-[#8ef0b5]">{box.boxPrice.toLocaleString("cs-CZ")} Kč / ks</p>
                         </div>
                       </div>
-                    ))
+                    ))}
+                  </div>
+                </div>
+              </Card>
+
+              <Card className="min-w-0 space-y-3">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Vybrané týmy</h2>
+                  <p className="text-xs text-slate-400">Rozbalte účastníka pro zobrazení a úpravu týmů.</p>
+                </div>
+                <div className="max-h-[28rem] space-y-2 overflow-y-auto overscroll-contain pr-1">
+                  {draft.participants.some((participant) => participant.picks.length > 0) ? (
+                    draft.participants.map((participant, participantIndex) => participant.picks.length > 0 ? (
+                      <details key={participant.id} className="rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+                        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+                          <span className="min-w-0 truncate text-sm font-semibold text-white">
+                            {participant.name || `Účastník ${participantIndex + 1}`}
+                          </span>
+                          <span className="shrink-0 rounded-full bg-slate-800 px-2 py-0.5 text-xs text-slate-300">
+                            {participant.picks.length} týmů
+                          </span>
+                        </summary>
+                        <div className="mt-3 flex flex-wrap gap-2 border-t border-slate-800 pt-3">
+                          {participant.picks.map((pickedItemId, pickedIndex) => {
+                            const item = draft.draftItems.find((currentItem) => currentItem.id === pickedItemId);
+                            return (
+                              <div key={`${pickedItemId}-${pickedIndex}`} className="inline-flex max-w-full items-center gap-2 rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1 text-sm text-[#8ef0b5]">
+                                <span className="inline-flex min-w-0 items-center gap-2">
+                                  <TeamLogo item={item ?? null} className="h-5 w-5 shrink-0" />
+                                  <span className="truncate">{item?.name ?? pickedItemId}</span>
+                                </span>
+                                {canReplaceSelection && availableItems.length > 0 ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => openReplaceDialog(participantIndex, participant.name || `Účastník ${participantIndex + 1}`, pickedItemId, item?.name ?? pickedItemId, pickedIndex)}
+                                    className="shrink-0 rounded-full border border-slate-700/70 bg-slate-900/80 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-300 transition hover:bg-slate-800"
+                                  >
+                                    Změnit
+                                  </button>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </details>
+                    ) : null)
                   ) : (
                     <p className="text-sm text-slate-400">Zatím nebyl vybrán žádný tým.</p>
                   )}
                 </div>
               </Card>
 
-              <DraftChat draftId={draft.id} draftCode={draft.code} currentUser={user} currentUserRole={profile?.role ?? null} />
-
-              {!isHistoryHidden ? (
-                <Card className="space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-2xl font-semibold text-white">Historie draftu</h2>
-                      <p className="text-sm text-slate-400">Nejnovější akce jsou zobrazeny nahoře.</p>
-                    </div>
-                  </div>
-                  <div className="space-y-3">
+              <Card className="!p-0">
+                <details>
+                  <summary className="cursor-pointer list-none p-4 [&::-webkit-details-marker]:hidden">
+                    <span className="font-semibold text-white">Historie draftu</span>
+                    <span className="ml-2 text-xs text-slate-400">{historyEntries.length} akcí · nejnovější nahoře</span>
+                  </summary>
+                  <div className="max-h-96 space-y-3 overflow-y-auto overscroll-contain px-4 pb-4">
                     {historyEntries.length > 0 ? (
                       historyEntries.map((entry, index) => {
                         const participant = draft.participants[entry.participantIndex];
@@ -2335,36 +2499,49 @@ function DraftDetailPageContent() {
                       <p className="text-sm text-slate-400">Zatím žádná historie.</p>
                     )}
                   </div>
-                </Card>
-              ) : null}
+                </details>
+              </Card>
 
-              {draft.status === "completed" ? (
-                <Card className="space-y-4">
-                  <h2 className="text-2xl font-semibold text-white">Konečný přehled</h2>
-                  <div className="space-y-2">
-                    {draft.participants.map((participant) => (
-                      <div key={participant.id} className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="font-semibold text-white">{participant.name || `Účastník ${draft.participants.indexOf(participant) + 1}`}</p>
-                        <p className="text-sm text-slate-400">Počet týmů: {participant.picks.length}</p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {participant.picks.map((pickedItemId) => {
-                            const item = draft.draftItems.find((currentItem) => currentItem.id === pickedItemId);
-                            return (
-                              <span key={pickedItemId} className="inline-flex items-center gap-2 rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1 text-sm text-[#8ef0b5]">
-                                <TeamLogo item={item ?? null} className="h-5 w-5" />
-                                {item?.name ?? pickedItemId}
-                              </span>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              ) : null}
             </div>
           </div>
         </div>
+        <section className="print-results hidden" aria-hidden="true">
+          <header className="print-results-header">
+            <p>{draft.sport} · DM Draft</p>
+            <h1>{draft.title}</h1>
+            <p>Kód: {draft.code} · Datum: {formatDraftDate(draft.createdAt)}</p>
+            <p>Stav: {draft.status === "completed" ? "Dokončeno" : "Průběžné výsledky"}</p>
+          </header>
+          <section className="print-break">
+            <h2>Složení breaku</h2>
+            <p>Celkem: {totalBreakBoxCount} {breakBoxCountLabel}</p>
+            <ul>
+              {breakComposition.map((box, index) => (
+                <li key={`${box.productId ?? box.productName}-${index}`}>
+                  {box.boxCount}× {box.productName} · {box.productSeason}
+                </li>
+              ))}
+            </ul>
+          </section>
+          <h2>Účastníci a jejich týmy</h2>
+          <div className="print-participants">
+            {draft.participants.map((participant, index) => (
+              <section key={participant.id} className="print-participant">
+                <h3>{index + 1}. {participant.displayName || participant.name || `Účastník ${index + 1}`} <span>({participant.picks.length} týmů)</span></h3>
+                {participant.picks.length > 0 ? (
+                  <ul>
+                    {participant.picks.map((pickedItemId) => {
+                      const item = draft.draftItems.find((draftItem) => draftItem.id === pickedItemId);
+                      return <li key={pickedItemId}>{item?.name ?? pickedItemId}</li>;
+                    })}
+                  </ul>
+                ) : (
+                  <p>Zatím bez výběru.</p>
+                )}
+              </section>
+            ))}
+          </div>
+        </section>
       </PageContainer>
 
       {joinModalOpen ? (

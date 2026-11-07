@@ -29,6 +29,40 @@ console.log("Running rankings logic unit tests...");
   console.log("✓ Test 2: ensureAllTeamsInOrder passed");
 }
 
+{
+  for (const teamCount of [14, 30, 32]) {
+    const teams = Array.from({ length: teamCount }, (_, index) => ({
+      id: `sport-team-${index + 1}`,
+      name: `Sport Team ${index + 1}`,
+      sport: "Test Sport",
+      logo: "",
+    }));
+    const order = ensureAllTeamsInOrder(
+      teams.slice(0, -1).map((team) => team.id).reverse(),
+      teams,
+    );
+    const ranking = calculateCombinedTeamRanking(
+      [{
+        productName: "Test Product",
+        productSeason: "2026",
+        boxCount: 1,
+        boxPrice: 1,
+        teamOrder: order,
+      }],
+      teams,
+    );
+
+    assert.equal(order.length, teamCount);
+    assert.equal(new Set(order).size, teamCount);
+    assert.equal(ranking.length, teamCount);
+    assert.deepEqual(
+      ranking.map((team) => team.finalRank).sort((a, b) => a - b),
+      Array.from({ length: teamCount }, (_, index) => index + 1),
+    );
+  }
+  console.log("✓ Team order validation and weighted rankings support 14, 30 and 32 teams");
+}
+
 // Test 3: User's exact prompt example
 // 3× Series One 2026/27 + 1× Ultimate 2025/26
 // Formula: (3 * r_series_one + 1 * r_ultimate) / 4

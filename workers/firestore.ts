@@ -1,5 +1,6 @@
 import {
   buildAutomaticPickUpdate,
+  getDraftStatusAfterPick,
   type AutoPickDraft,
   type AutoPickHistoryItem,
   type AutoPickParticipant,
@@ -309,12 +310,13 @@ function decodePriorities(value: unknown): Record<string, string[]> {
 }
 
 function decodeDraft(fields: Record<string, unknown>): AutoPickDraft | null {
-  const participants = Array.isArray(fields.participants)
-    ? fields.participants.flatMap((participant) => {
-        const decoded = decodeParticipant(participant);
-        return decoded ? [decoded] : [];
-      })
-    : [];
+  if (!Array.isArray(fields.participants)) return null;
+  const participants: AutoPickParticipant[] = [];
+  for (const rawParticipant of fields.participants) {
+    const participant = decodeParticipant(rawParticipant);
+    if (!participant) return null;
+    participants.push(participant);
+  }
   const history = decodeHistory(fields.history);
   const draftItems = decodeDraftItems(fields.draftItems);
   const currentPickIndex = Number(fields.currentPickIndex ?? 0);
@@ -582,8 +584,7 @@ async function processExpiredDraft(
       }
       const pickUpdate = buildAutomaticPickUpdate(draft);
       if (!pickUpdate) {
-        const noRemainingPicks = draft.currentPickIndex >= draft.pickOrder.length;
-        if (draft.availableItemIds.length > 0 && !noRemainingPicks) {
+        if (getDraftStatusAfterPick(draft.availableItemIds) !== "completed") {
           return { status: "invalid" };
         }
 

@@ -7,6 +7,7 @@ import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { getFirebaseClient } from "@/lib/firebase";
+import { createDraftWithUniqueCode } from "@/lib/createDraft";
 import { buildSnakeOrder, defaultDraftItems, type DraftItem } from "@/lib/snakeDraft";
 import {
   calculateCombinedTeamRanking,
@@ -342,7 +343,6 @@ function NewDraftPageContent() {
 
     try {
       const { db, firestoreApi } = await getFirebaseClient();
-      const draftCode = generateDraftCode();
 
       const reservedParticipantNames = formValues.participantNames
         .split(/\r?\n/)
@@ -417,10 +417,9 @@ function NewDraftPageContent() {
         turnDurationSeconds,
         createdAt: firestoreApi.serverTimestamp(),
         updatedAt: firestoreApi.serverTimestamp(),
-        code: draftCode,
       };
 
-      await firestoreApi.setDoc(firestoreApi.doc(db, "drafts", draftCode), draftData);
+      const draftCode = await createDraftWithUniqueCode(db, firestoreApi, generateDraftCode, draftData);
       router.push(`/draft/${draftCode}`);
     } catch (createError) {
       console.error(createError);
@@ -456,7 +455,7 @@ function NewDraftPageContent() {
                 Vytvořit nový snake draft
               </h1>
               <p className="text-base text-slate-400">
-                Nastavte parametry draftu a zvolte kombinaci boxů. Ze zvolených boxů se automaticky sestaví vážený žebříček atraktivity všech 32 týmů NHL.
+                Nastavte parametry draftu a zvolte kombinaci boxů. Ze zvolených boxů se automaticky sestaví vážený žebříček atraktivity všech {defaultDraftItems.length} týmů NHL.
               </p>
             </div>
 
@@ -492,7 +491,7 @@ function NewDraftPageContent() {
                     onChange={(event) => handleChange("sport", event.target.value)}
                     className="rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-[#18C964]"
                   >
-                    <option value="NHL">NHL (32 týmů)</option>
+                    <option value="NHL">NHL ({defaultDraftItems.length} týmů)</option>
                   </select>
                 </div>
               </div>
@@ -613,7 +612,7 @@ function NewDraftPageContent() {
                     <div className="flex items-center gap-2">
                       <h3 className="text-base font-bold text-white">Vypočtený žebříček atraktivity pro draft</h3>
                       <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-bold text-[#8ef0b5]">
-                        32 týmů
+                        {defaultDraftItems.length} týmů
                       </span>
                     </div>
                     <p className="mt-1 text-xs text-slate-400">
@@ -639,7 +638,9 @@ function NewDraftPageContent() {
                       onClick={() => setIsRankingExpanded(!isRankingExpanded)}
                       className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-bold text-[#8ef0b5] hover:bg-slate-800"
                     >
-                      {isRankingExpanded ? "Skrýt všech 32 týmů ▲" : "Zobrazit a upravit všech 32 týmů ▼"}
+                      {isRankingExpanded
+                        ? `Skrýt všech ${activeTeamOrder.length} týmů ▲`
+                        : `Zobrazit a upravit všech ${activeTeamOrder.length} týmů ▼`}
                     </button>
                   </div>
                 </div>

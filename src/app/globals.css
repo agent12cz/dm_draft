@@ -50,3 +50,130 @@ a {
   background-size: cover;
   background-repeat: no-repeat;
 }
+
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+
+  html,
+  body {
+    height: auto !important;
+    min-height: 0 !important;
+    background: #fff !important;
+    color: #111 !important;
+  }
+
+  .dm-background::before {
+    display: none !important;
+  }
+
+  .dm-background {
+    display: block !important;
+    min-height: 0 !important;
+  }
+
+  .print-draft-page {
+    min-height: 0 !important;
+  }
+
+  .print-draft-page > :not(main),
+  .print-draft-page main > :not(.print-results) {
+    display: none !important;
+  }
+
+  .print-draft-page main {
+    display: block !important;
+    width: auto !important;
+    min-height: 0 !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .print-results {
+    position: static;
+    display: block !important;
+    width: 100%;
+    padding: 0;
+    background: #fff !important;
+    color: #111 !important;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+
+  .print-results *,
+  .print-results *::before,
+  .print-results *::after {
+    background: transparent !important;
+    color: #111 !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+
+  .print-results-header {
+    border-bottom: 2px solid #222;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+  }
+
+  .print-results-header p {
+    margin: 0.25rem 0;
+    font-size: 10pt;
+  }
+
+  .print-results h1 {
+    margin: 0.5rem 0;
+    font-size: 22pt;
+  }
+
+  .print-results h2 {
+    margin: 0 0 0.75rem;
+    font-size: 15pt;
+  }
+
+  .print-break {
+    margin-bottom: 1rem;
+  }
+
+  .print-break p,
+  .print-break li {
+    margin: 0;
+    font-size: 9pt;
+  }
+
+  .print-break ul {
+    margin: 0.3rem 0 0;
+    padding-left: 1rem;
+  }
+
+  .print-participants {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .print-participant {
+    break-inside: avoid;
+    border: 1px solid #bbb;
+    border-radius: 4px;
+    padding: 0.6rem 0.75rem;
+  }
+
+  .print-participant h3 {
+    margin: 0;
+    font-size: 11pt;
+  }
+
+  .print-participant h3 span,
+  .print-participant p,
+  .print-participant li {
+    font-size: 9pt;
+  }
+
+  .print-participant ul {
+    columns: 2;
+    margin: 0.4rem 0 0;
+    padding-left: 1rem;
+  }
+}

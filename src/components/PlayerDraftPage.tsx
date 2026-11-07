@@ -7,6 +7,7 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
+import { getDraftStatusAfterPick } from "@/lib/autoPick";
 import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import { getTimeLeftForTurn, getTurnKey, type TurnCountdown } from "@/lib/turnCountdown";
@@ -607,8 +608,13 @@ export default function PlayerDraftPage() {
   const currentRound = draft
     ? Math.floor(draft.currentPickIndex / Math.max(1, draft.participantCount)) + 1
     : 1;
-  const totalPicks = draft ? Math.max(1, draft.pickOrder.length) : 0;
-  const currentPickNumber = draft ? Math.min(draft.currentPickIndex + 1, totalPicks) : 0;
+  const totalPicks = draft?.draftItems.length ?? 0;
+  const totalTurns = draft?.pickOrder.length ?? 0;
+  const currentPickNumber = draft ? Math.min(draft.currentPickIndex + 1, totalTurns) : 0;
+  const completedPickCount = draft?.history.filter((entry) => entry.type === "pick").length ?? 0;
+  const totalRounds = draft
+    ? Math.ceil(totalTurns / Math.max(1, draft.participantCount))
+    : 0;
 
   // Výpočet ceny za pozici pro hráčské rozhraní
   const paidSlots = draft
@@ -779,15 +785,13 @@ export default function PlayerDraftPage() {
     try {
       const { db, firestoreApi } = await getFirebaseClient();
 
-      const nextParticipants = draft.participants.map((p) =>
-        p.userId === user.uid ? { ...p, priorities: order } : p
+      await firestoreApi.updateDoc(
+        firestoreApi.doc(db, "drafts", draft.id),
+        new firestoreApi.FieldPath("playerPriorities", user.uid),
+        order,
+        "updatedAt",
+        firestoreApi.serverTimestamp(),
       );
-
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
-        participants: nextParticipants,
-        [`playerPriorities.${user.uid}`]: order,
-        updatedAt: firestoreApi.serverTimestamp(),
-      });
 
       if (typeof window !== "undefined") {
         window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
@@ -875,10 +879,7 @@ export default function PlayerDraftPage() {
 
         const nextPickIndex = latestCurrentPickIndex + 1;
         const nextAvailableItemIds = latestAvailableItemIds.filter((availableItemId) => availableItemId !== item.id);
-        const nextStatus =
-          nextPickIndex >= latestPickOrder.length || nextAvailableItemIds.length === 0
-            ? "completed"
-            : "drafting";
+        const nextStatus = getDraftStatusAfterPick(nextAvailableItemIds);
         const nextParticipants = latestParticipants.map((participant, index) =>
           index === latestCurrentParticipantIndex ? { ...participant, picks: [...participant.picks, item.id] } : participant,
         );
@@ -1105,7 +1106,7 @@ export default function PlayerDraftPage() {
                       Draft zatím nebyl zahájen
                     </p>
                     <p className="mt-0.5 text-xs text-slate-300">
-                      Máte dostatek času na přípravu. V záložce <strong className="text-white">Moje priority</strong> si můžete seřadit všech 32 týmů a v záložce <strong className="text-white">Žebříček draftu</strong> prohlédnout oficiální pořadí.
+                      Máte dostatek času na přípravu. V záložce <strong className="text-white">Moje priority</strong> si můžete seřadit všech {draft.draftItems.length} týmů a v záložce <strong className="text-white">Žebříček draftu</strong> prohlédnout oficiální pořadí.
                     </p>
                   </div>
                 </div>
@@ -1140,21 +1141,21 @@ export default function PlayerDraftPage() {
                   </div>
 
                   <h2 className="mt-2 text-2xl font-black tracking-tight text-white sm:text-4xl">
-                    DRAFT DOKONČEN
+                    Draft dokončen
                   </h2>
 
                   <p className="mt-1 text-xs font-semibold text-[#8ef0b5] sm:text-sm">
-                    Všech 32 týmů bylo rozebráno. Děkujeme za účast!
+                    Všechny týmy byly rozděleny. Děkujeme za účast!
                   </p>
 
                   <div className="mt-4 flex flex-wrap gap-2 text-xs">
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Celkem kol</span>
-                      <span className="text-white">{currentRound}</span>
+                      <span className="text-white">{totalRounds}</span>
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Výběrů</span>
-                      <span className="text-[#8ef0b5]">{draft.history.length}</span>
+                      <span className="text-[#8ef0b5]">{completedPickCount}</span>
                       <span className="text-slate-500">/ {totalPicks}</span>
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-950/60 px-3 py-1.5 font-bold text-[#8ef0b5]">
@@ -1219,7 +1220,7 @@ export default function PlayerDraftPage() {
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Tah</span>
                       <span className="text-[#8ef0b5]">{currentPickNumber}</span>
-                      <span className="text-slate-500">/ {totalPicks}</span>
+                      <span className="text-slate-500">/ {totalTurns}</span>
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Dostupných týmů</span>
@@ -1239,7 +1240,7 @@ export default function PlayerDraftPage() {
 
                   <div className="my-3 text-center sm:text-left">
                     <p className="text-xl font-bold text-white sm:text-2xl">
-                      Všech 32 týmů bylo rozebráno
+                      Všechny týmy byly rozděleny
                     </p>
                     <p className="mt-1 text-xs text-slate-400">
                       Výsledky a týmy účastníků naleznete níže v přehledu.
@@ -1562,7 +1563,7 @@ export default function PlayerDraftPage() {
                           <div>
                             <div className="flex items-center gap-2">
                               <h3 className="text-xl font-black tracking-tight text-white sm:text-2xl">
-                                Dostupné NHL týmy
+                                Dostupné týmy
                               </h3>
                               <span className="rounded-full border border-[#18C964]/30 bg-[#18C964]/10 px-2.5 py-0.5 text-xs font-bold text-[#8ef0b5]">
                                 {availableItems.length}
@@ -1570,7 +1571,7 @@ export default function PlayerDraftPage() {
                             </div>
                             <p className="mt-1 text-xs text-slate-400">
                               {isCompleted
-                                ? "Všech 32 týmů bylo rozebráno. Draft je u konce."
+                                ? "Všechny týmy byly rozděleny. Draft je u konce."
                                 : canPickTeam
                                   ? "👉 Jste na tahu! Klikněte na tlačítko „Vybrat“ u vašeho vybraného týmu."
                                   : "Výběr týmu je aktivní pouze tehdy, když jste na tahu."}
@@ -1687,11 +1688,11 @@ export default function PlayerDraftPage() {
                                 Moje priority výběru
                               </h3>
                               <span className="rounded-full border border-[#18C964]/30 bg-[#18C964]/10 px-2.5 py-0.5 text-xs font-bold text-[#8ef0b5]">
-                                32 týmů
+                                {draft.draftItems.length} týmů
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-400">
-                              Seřaďte si všech 32 týmů přetažením myší nebo tlačítky ▲ / ▼. Již vybrané týmy budou automaticky přeskočeny.
+                              Seřaďte si všech {draft.draftItems.length} týmů přetažením myší nebo tlačítky ▲ / ▼. Již vybrané týmy budou automaticky přeskočeny.
                             </p>
                           </div>
 
@@ -1909,11 +1910,11 @@ export default function PlayerDraftPage() {
                                 Žebříček draftu (společné pořadí)
                               </h3>
                               <span className="rounded-full border border-[#18C964]/30 bg-[#18C964]/10 px-2.5 py-0.5 text-xs font-bold text-[#8ef0b5]">
-                                32 týmů
+                                {draft.draftItems.length} týmů
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-400">
-                              Společné pořadí atraktivity všech 32 týmů NHL vypočtené ze zvolených boxů a nastavené organizátorem pro tento draft.
+                              Společné pořadí atraktivity všech týmů vypočtené ze zvolených boxů a nastavené organizátorem pro tento draft.
                             </p>
                           </div>
 

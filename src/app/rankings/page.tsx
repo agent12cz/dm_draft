@@ -135,7 +135,7 @@ function RankingsPageContent() {
     const source = rankings.find((r) => r.id === sourceId);
     if (source) {
       setCurrentTeamOrder(ensureAllTeamsInOrder(source.teamOrder));
-      setSuccessMessage(`Pořadí 32 týmů bylo zkopírováno ze žebříčku „${source.series} ${source.season}“.`);
+      setSuccessMessage(`Pořadí ${source.teamOrder.length} týmů bylo zkopírováno ze žebříčku „${source.series} ${source.season}“.`);
     }
   }
 
@@ -267,7 +267,7 @@ function RankingsPageContent() {
                 Žebříčky atraktivity týmů NHL
               </h1>
               <p className="mt-1 text-sm text-slate-400">
-                Každá série a ročník boxu má vlastní žebříček všech 32 týmů, který slouží jako základ pro automatické draftování.
+                Každá série a ročník boxu má vlastní žebříček týmů daného sportu, který slouží jako základ pro automatické draftování.
               </p>
             </div>
 
@@ -423,7 +423,7 @@ function RankingsPageContent() {
               {/* Sorting toolbar */}
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800/80 bg-slate-950/60 px-4 py-3 text-xs">
                 <div className="flex items-center gap-2">
-                  <span className="font-bold text-white">Pořadí všech 32 týmů</span>
+                  <span className="font-bold text-white">Pořadí všech {currentTeamOrder.length} týmů</span>
                   <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-300">
                     {currentTeamOrder.length} týmů
                   </span>
