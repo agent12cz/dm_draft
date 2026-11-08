@@ -90,6 +90,8 @@ let timers = [];
 let searchResponse;
 let searchFailure;
 const calls = [];
+let draftSnapshotCallback;
+const pendingDraftAccess = [];
 const invitationToken = "A".repeat(43);
 let copiedInvitationLink;
 const container = ({ children }) => React.createElement("div", null, children);
@@ -124,9 +126,18 @@ const page = load("../src/app/draft/[code]/page.tsx", {
   "@/components/PageContainer": { PageContainer: container },
   "@/components/DraftChat": { DraftChat: () => null },
   "@/app/auth-guard": { __esModule: true, default: container },
-  "@/lib/firestoreWorker": { callFirestoreWorker: callWorker },
+  "@/lib/firestoreWorker": {
+    callFirestoreWorker: callWorker,
+    getDraftPrivateAccess: () => new Promise((resolve) => pendingDraftAccess.push(resolve)),
+  },
   "@/lib/participantUpdate": participantHelper,
-  "@/lib/firebase": { getFirebaseClient: async () => ({ db: {}, firestoreApi: {} }) },
+  "@/lib/firebase": { getFirebaseClient: async () => ({
+    db: {},
+    firestoreApi: {
+      doc: () => ({}),
+      onSnapshot: (_ref, callback) => { draftSnapshotCallback = callback; return () => {}; },
+    },
+  }) },
   "@/lib/snakeDraft": { normalizeDraftItem: (item) => item },
   "@/lib/participantDraw": {},
   "@/lib/startDraft": {},
@@ -234,3 +245,33 @@ assert.deepEqual(JSON.parse(JSON.stringify(calls.find((call) => call.operation =
   payload: { draftId: "HM85L", participantIds: ["slot"] },
 });
 console.log("✓ Generated and copied invitations keep the token only in the URL fragment");
+
+render();
+const unsubscribeDraft = effects[0]();
+for (let index = 0; index < 30; index++) await Promise.resolve();
+const snapshot = { id: fixture.id, exists: () => true, data: () => fixture };
+draftSnapshotCallback(snapshot);
+draftSnapshotCallback(snapshot);
+assert.equal(pendingDraftAccess.length, 2);
+const rawParticipants = [{ id: "slot", name: "", picks: [], userId: "", uid: "", email: "", participantId: "slot", participantPin: null, joinedAt: null }];
+pendingDraftAccess[1]({ authorized: true, role: "owner", participants: rawParticipants });
+for (let index = 0; index < 30; index++) await Promise.resolve();
+assert.equal(state[0].participantSnapshot, rawParticipants);
+assert.equal(state[0].participants[0].name, "Účastník 1");
+assert.equal(state[0].participants[0].pickCount, 0);
+pendingDraftAccess[0]({ authorized: true, role: "owner", participants: [{ ...rawParticipants[0], name: "Stale response" }] });
+for (let index = 0; index < 30; index++) await Promise.resolve();
+assert.equal(state[0].participantSnapshot, rawParticipants);
+state[13] = "da";
+state[14] = [{ uid: "dan", displayName: "Dan" }];
+state[15] = 0;
+const snapshotCandidate = find(render(), (node) => node.type === "button" && node.key === "dan");
+assert.ok(snapshotCandidate);
+snapshotCandidate.props.onClick();
+for (let index = 0; index < 30; index++) await Promise.resolve();
+const snapshotAssignment = calls.filter((call) => call.operation === "draft.update").at(-1);
+assert.deepEqual(snapshotAssignment.payload.expected.participants, rawParticipants);
+assert.equal("pickCount" in snapshotAssignment.payload.expected.participants[0], false);
+assert.equal(snapshotAssignment.payload.updates.participants[0].userId, "dan");
+unsubscribeDraft();
+console.log("✓ Realtime loading keeps the exact latest access snapshot for assignment and ignores stale access responses");

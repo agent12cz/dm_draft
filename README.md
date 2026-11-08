@@ -59,6 +59,8 @@ Organizers can mark one or more positions as waiting for registration and create
 
 An unclaimed registration position remains eligible for automatic picks using the organizer ranking. After claiming, all positions linked to the account use that account's saved player priorities. The common-code join operation takes the first open position and never matches an account by name.
 
+Participant edits and draft start compare the original authenticated access snapshot, separately from UI-normalized participants. The Worker compares the JSON-visible state inside its transaction: omitted optional fields do not cause false conflicts, while changed assignments, invitation statuses, picks and participant order still reject stale writes.
+
 ### Migrating existing drafts
 
 Before publishing `firestore.rules`, migrate legacy documents from `drafts` (including chat messages) to `publicDrafts` and `draftPrivate`. Deploy the application Worker with the new API before publishing the rules; otherwise clients using the old app or old Worker will no longer be able to write. Do not publish restrictive rules until the migration and Worker rollout are complete.

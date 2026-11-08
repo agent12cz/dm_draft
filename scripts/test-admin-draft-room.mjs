@@ -157,6 +157,11 @@ assert.doesNotMatch(waiting, /<button[^>]*disabled=""[^>]*>\s*Přiřadit uživat
 console.log("✓ Results share two switchable panels; participant accordions start closed and retain controls with post-start locks");
 
 const completed = render(32);
+assert.match(completed, /<div class="print-draft-page min-h-screen text-slate-100">/);
+assert.equal((completed.match(/class="print-results hidden"/g) ?? []).length, 1);
+const printResults = completed.slice(completed.indexOf('<section class="print-results hidden"'));
+assert.equal((printResults.match(/class="print-participant"/g) ?? []).length, 8);
+for (let index = 1; index <= 32; index++) assert.ok(printResults.includes(`Tým ${index}`));
 assert.match(completed, /Draft dokončen/);
 assert.match(completed, /Dokončené výběry: 32 z 32/);
 assert.match(completed, /Tým 32/);

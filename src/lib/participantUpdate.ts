@@ -9,6 +9,8 @@ type ParticipantFirestore = {
 
 type ExpectedState<T> = {
   participants: T[];
+  // Compare the server snapshot, not participants enriched for display.
+  participantSnapshot?: Array<Record<string, unknown>>;
   status: string;
   participantOrderDrawn?: boolean;
   currentPickIndex?: number;
@@ -35,7 +37,7 @@ export async function commitParticipantUpdate<T>(
   const expectedState: Record<string, unknown> = {
     status: expected.status,
     participantOrderDrawn: Boolean(expected.participantOrderDrawn),
-    participants: expected.participants.map(normalize),
+    participants: expected.participantSnapshot ?? expected.participants.map(normalize),
   };
   if (options.checkTurn) {
     expectedState.currentPickIndex = expected.currentPickIndex ?? 0;

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import {
   executeFirestoreSecurityOperation,
   runImmediateDraftPick,
@@ -322,6 +325,30 @@ async function operation(actorId, name, payload = {}) {
     firestore.fetchMock,
   );
 }
+
+function loadClientHelper(path) {
+  const source = readFileSync(new URL(path, import.meta.url), "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const testModule = { exports: {} };
+  runInNewContext(compiled, {
+    module: testModule,
+    exports: testModule.exports,
+    require: (name) => {
+      assert.equal(name, "@/lib/firestoreWorker");
+      return {
+        callFirestoreWorker: (name, payload) =>
+          operation("owner", name, JSON.parse(JSON.stringify(payload))),
+      };
+    },
+    Error,
+  });
+  return testModule.exports;
+}
+
+const { commitParticipantUpdate } = loadClientHelper("../src/lib/participantUpdate.ts");
+const { startDraft } = loadClientHelper("../src/lib/startDraft.ts");
 
 await operation("owner", "draft.create", {
   draftId: "ROOM1",
@@ -1239,3 +1266,135 @@ assert.equal(raceClaims.filter((result) => result.status === "used").length, 1);
 const raceOwnerId = firestore.read("draftPrivate/INVRACE").participants[0].userId;
 assert.ok(["invite-race-a", "invite-race-b"].includes(raceOwnerId));
 console.log("✓ Concurrent claims commit atomically for only one authenticated UID");
+
+await operation("owner", "draft.create", {
+  draftId: "ASSIGN-REGRESSION",
+  data: {
+    title: "Registered assignment and invitation",
+    status: "waiting",
+    participantCount: 2,
+    participants: [
+      { id: "registered-seat", name: "", picks: [] },
+      { id: "invited-seat", name: "Guest", picks: [], status: "pending-registration" },
+    ],
+    pickOrder: [0, 1],
+    availableItemIds: ["team-a", "team-b"],
+    draftItems: [{ id: "team-a", name: "Team A" }, { id: "team-b", name: "Team B" }],
+    history: [],
+  },
+});
+const assignmentInvitation = await operation("owner", "invite.create", {
+  draftId: "ASSIGN-REGRESSION",
+  participantIds: ["invited-seat"],
+});
+const assignmentSnapshot = JSON.parse(JSON.stringify(
+  (await operation("owner", "draft.access", { draftId: "ASSIGN-REGRESSION" })).participants,
+));
+assert.equal("invitationStatus" in assignmentSnapshot[0], false);
+assert.equal("displayName" in assignmentSnapshot[0], false);
+assert.equal("pickCount" in assignmentSnapshot[0], false);
+const normalizedAssignmentParticipants = assignmentSnapshot.map((participant, index) => ({
+  ...participant,
+  name: participant.name || `Účastník ${index + 1}`,
+  displayName: participant.name || `Účastník ${index + 1}`,
+  pickCount: participant.picks.length,
+  status: participant.status ?? "waiting",
+}));
+const assignmentExpected = {
+  status: "waiting",
+  participants: normalizedAssignmentParticipants,
+  participantSnapshot: assignmentSnapshot,
+};
+const assignmentUpdates = {
+  participants: normalizedAssignmentParticipants.map((participant, index) => index === 0
+    ? { ...participant, name: "Player One", displayName: "Player One", userId: "player-1", uid: "player-1", status: "ready" }
+    : participant),
+};
+firestore.beforeNextCommit(() => firestore.seed("publicDrafts/ASSIGN-REGRESSION", {
+  ...firestore.read("publicDrafts/ASSIGN-REGRESSION"),
+  title: "An unrelated realtime update",
+}));
+await commitParticipantUpdate(
+  {}, {}, "ASSIGN-REGRESSION", assignmentExpected, assignmentUpdates,
+  (participant) => participant, { waiting: true },
+);
+assert.equal(firestore.read("draftPrivate/ASSIGN-REGRESSION").participants[0].userId, "player-1");
+assert.equal(firestore.read("publicDrafts/ASSIGN-REGRESSION").title, "An unrelated realtime update");
+assert.equal((await operation("invite-new", "invite.preview", { token: assignmentInvitation.token })).status, "active");
+console.log("✓ JSON client assignment compares the untouched access snapshot, not UI defaults; unrelated realtime updates safely retry");
+
+const assignedSnapshot = JSON.parse(JSON.stringify(
+  (await operation("owner", "draft.access", { draftId: "ASSIGN-REGRESSION" })).participants,
+));
+const assignedExpected = {
+  status: "waiting",
+  participants: assignedSnapshot,
+  participantSnapshot: assignedSnapshot,
+};
+const beforeConflictPublic = firestore.read("publicDrafts/ASSIGN-REGRESSION");
+const beforeConflictPrivate = firestore.read("draftPrivate/ASSIGN-REGRESSION");
+for (const change of [
+  { path: "publicDrafts/ASSIGN-REGRESSION", field: "status", value: "drafting" },
+  { path: "publicDrafts/ASSIGN-REGRESSION", field: "participantOrderDrawn", value: true },
+  { path: "publicDrafts/ASSIGN-REGRESSION", participant: { name: "Changed name" } },
+  { path: "publicDrafts/ASSIGN-REGRESSION", participant: { picks: ["team-a"] } },
+  { path: "draftPrivate/ASSIGN-REGRESSION", participant: { userId: "player-2" } },
+  { path: "draftPrivate/ASSIGN-REGRESSION", participant: { participantPin: "112233" } },
+]) {
+  firestore.beforeNextCommit(() => {
+    const document = firestore.read(change.path);
+    firestore.seed(change.path, change.participant
+      ? { ...document, participants: document.participants.map((participant, index) =>
+          index === 0 ? { ...participant, ...change.participant } : participant) }
+      : { ...document, [change.field]: change.value });
+  });
+  await assert.rejects(
+    commitParticipantUpdate(
+      {}, {}, "ASSIGN-REGRESSION", assignedExpected, { participants: assignedSnapshot },
+      (participant) => participant, { waiting: true },
+    ),
+    (error) => error.status === 409,
+  );
+  firestore.seed("publicDrafts/ASSIGN-REGRESSION", beforeConflictPublic);
+  firestore.seed("draftPrivate/ASSIGN-REGRESSION", beforeConflictPrivate);
+}
+console.log("✓ Transaction retries still reject concurrent status, order, name, pick, UID and PIN changes without overwriting them");
+
+await operation("owner", "invite.revoke", { draftId: "ASSIGN-REGRESSION", participantId: "invited-seat" });
+await assert.rejects(
+  commitParticipantUpdate(
+    {}, {}, "ASSIGN-REGRESSION", assignedExpected, { participants: assignedSnapshot },
+    (participant) => participant, { waiting: true },
+  ),
+  (error) => error.status === 409,
+);
+const renewedAssignmentInvitation = await operation("owner", "invite.create", {
+  draftId: "ASSIGN-REGRESSION", participantIds: ["invited-seat"],
+});
+const beforeClaimSnapshot = JSON.parse(JSON.stringify(
+  (await operation("owner", "draft.access", { draftId: "ASSIGN-REGRESSION" })).participants,
+));
+assert.equal((await operation("invite-new", "invite.claim", { token: renewedAssignmentInvitation.token })).status, "claimed");
+await assert.rejects(
+  commitParticipantUpdate(
+    {}, {}, "ASSIGN-REGRESSION",
+    { status: "waiting", participants: beforeClaimSnapshot, participantSnapshot: beforeClaimSnapshot },
+    { participants: beforeClaimSnapshot }, (participant) => participant, { waiting: true },
+  ),
+  (error) => error.status === 409,
+);
+assert.deepEqual(
+  firestore.read("draftPrivate/ASSIGN-REGRESSION").participants.map((participant) => participant.userId),
+  ["player-1", "invite-new"],
+);
+const startSnapshot = JSON.parse(JSON.stringify(
+  (await operation("owner", "draft.access", { draftId: "ASSIGN-REGRESSION" })).participants,
+));
+await startDraft(
+  {}, {}, "ASSIGN-REGRESSION", startSnapshot,
+  startSnapshot.map((participant) => participant.name), ["team-a", "team-b"], [],
+  (participant) => ({ ...participant, pickCount: participant.picks.length }),
+  startSnapshot,
+);
+assert.equal(firestore.read("publicDrafts/ASSIGN-REGRESSION").status, "drafting");
+console.log("✓ Registered assignments coexist with invitations; stale revocations and claims conflict, and starting uses the original snapshot");

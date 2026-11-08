@@ -79,6 +79,7 @@ type Draft = {
   targetBreakPrice: number;
   participantCount: number;
   participants: DraftParticipant[];
+  participantSnapshot?: Array<Record<string, unknown>>;
   currentPickIndex: number;
   pickOrder: number[];
   draftItems: DraftItem[];
@@ -358,6 +359,7 @@ function DraftDetailPageContent() {
                 targetBreakPrice: Number(data.targetBreakPrice ?? 0),
                 participantCount: Number(data.participantCount ?? 0),
                 participants: access.participants.map((participant, index) => normalizeParticipant(participant as DraftParticipant, index)),
+                participantSnapshot: access.participants,
                 currentPickIndex: Number(data.currentPickIndex ?? 0),
                 pickOrder: (data.pickOrder ?? []) as number[],
                 draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
@@ -1221,6 +1223,7 @@ function DraftDetailPageContent() {
       await startDraft(
         db, firestoreApi, draft.id, draft.participants, participantNames,
         finalTeamRanking, draft.teamRanking, normalizeParticipant,
+        draft.participantSnapshot,
       );
     } catch (startError) {
       console.error(startError);
@@ -1470,7 +1473,7 @@ function DraftDetailPageContent() {
       : "boxů";
 
   return (
-    <div className="min-h-screen text-slate-100">
+    <div className="print-draft-page min-h-screen text-slate-100">
       <Navbar />
       <PageContainer className={isDraftWaiting ? "py-4 lg:py-6" : "py-8 lg:py-10"}>
         <div className="mx-auto flex max-w-7xl flex-col gap-3 print:hidden">

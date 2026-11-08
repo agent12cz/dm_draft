@@ -25,6 +25,7 @@ export async function startDraft<T extends Participant>(
   finalTeamRanking: string[],
   expectedTeamRanking: string[] | undefined,
   normalize: (participant: T, index: number) => T,
+  participantSnapshot?: Array<Record<string, unknown>>,
 ): Promise<void> {
   const current = expectedParticipants.map(normalize);
   const nextParticipants = current.map((participant, index) => ({
@@ -33,7 +34,7 @@ export async function startDraft<T extends Participant>(
   }));
   await callFirestoreWorker("draft.start", {
     draftId,
-    expectedParticipants: current,
+    expectedParticipants: participantSnapshot ?? current,
     expectedTeamRanking: expectedTeamRanking ?? [],
     participants: nextParticipants,
     teamRanking: finalTeamRanking,
