@@ -2,6 +2,8 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { FirebaseAuthError, verifyFirebaseIdToken } from "../../../../workers/firebaseAuth";
 import {
   executeFirestoreSecurityOperation,
+  FirestoreHttpError,
+  FirestoreSecurityError,
   type DraftWorkerEnv,
 } from "../../../../workers/firestore";
 import { consumeRateLimit } from "../../../../workers/rateLimit";
@@ -83,16 +85,35 @@ export async function POST(request: Request) {
     );
     return jsonResponse(200, result);
   } catch (error) {
-    if (error instanceof Error && "status" in error && typeof error.status === "number") {
+    if (error instanceof FirestoreSecurityError) {
       if (error.status === 403) return jsonResponse(403, { status: "forbidden" });
       if (error.status === 404) return jsonResponse(404, { status: "missing" });
       if (error.status === 409) return jsonResponse(409, { status: "conflict" });
       if (error.status === 400) {
+        if (process.env.NODE_ENV === "development") {
+          console.error("Firestore API request rejected.", {
+            source: "validation",
+            status: error.status,
+          });
+        }
         return jsonResponse(400, { status: "invalid", message: error.message });
       }
     }
 
-    console.error("The Firestore Worker operation failed.", error);
+    if (error instanceof FirestoreHttpError) {
+      const diagnostic = {
+        source: "upstream",
+        operation: error.operation,
+        httpStatus: error.status,
+        reason: error.reason,
+      };
+      console.error("The Firestore Worker upstream request failed.", diagnostic);
+      return jsonResponse(502, {
+        status: "failed",
+        ...(process.env.NODE_ENV === "development" ? { diagnostic } : {}),
+      });
+    }
+    console.error("The Firestore Worker operation failed.");
     return jsonResponse(502, { status: "failed" });
   }
 }

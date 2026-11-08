@@ -7,12 +7,14 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { Card } from "@/components/Card";
+import { DraftBoxGallery } from "@/components/DraftBoxGallery";
 import { getFirebaseClient } from "@/lib/firebase";
 import { callFirestoreWorker } from "@/lib/firestoreWorker";
 import { createDraftWithUniqueCode } from "@/lib/createDraft";
 import { buildSnakeOrder, defaultDraftItems } from "@/lib/snakeDraft";
 import AuthGuard from "@/app/auth-guard";
 import { useAuth } from "@/components/AuthProvider";
+import type { BoxSelection } from "@/lib/rankings";
 
 type DraftStatus = "waiting" | "drafting" | "paused" | "completed";
 
@@ -26,6 +28,7 @@ type DraftDocument = {
   productName?: string;
   productSeason?: string;
   productImageUrl?: string;
+  boxes?: BoxSelection[];
   participantCount?: number;
   participants?: Array<{ id?: string; name?: string; picks?: string[] }>;
   currentPickIndex?: number;
@@ -285,7 +288,7 @@ function HomeContent() {
         </div>
 
         <div className="mt-8 grid gap-6 xl:grid-cols-[1.3fr_0.7fr]">
-          <section className="space-y-5">
+          <section className="min-w-0 space-y-5">
             <div className="flex items-center justify-between">
               <h2 className="text-2xl font-semibold text-white">Moje drafty</h2>
               <span className="text-sm text-slate-400">{drafts.length} záznamů</span>
@@ -314,22 +317,23 @@ function HomeContent() {
                           key={draft.id}
                           className="relative flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_80px_rgba(2,6,23,0.4)] backdrop-blur-xl transition hover:-translate-y-0.5"
                         >
-                          <span className="absolute right-4 top-4 shrink-0 rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1 text-xs font-semibold text-[#8ef0b5]">
-                            {getStatusLabel(draft.status)}
-                          </span>
-
-                          <Link href={`/draft/${draft.code}`} className="flex flex-1 flex-col gap-4 pr-24 lg:grid lg:grid-cols-[45%_55%] lg:items-start">
+                          <Link href={`/draft/${draft.code}`} className="flex min-w-0 flex-1 flex-col gap-4">
                             <div className="flex min-w-0 flex-col">
-                              <div className="space-y-2">
-                                <p className="text-sm font-medium uppercase tracking-[0.24em] text-slate-500">
-                                  {draft.sport || "NHL Draft"}
-                                </p>
-                                <h4 className="whitespace-nowrap overflow-hidden text-ellipsis text-xl font-semibold text-white">
-                                  {draft.title}
-                                </h4>
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1 basis-40 space-y-2">
+                                  <p className="text-sm font-medium uppercase tracking-[0.24em] text-slate-500">
+                                    {draft.sport || "NHL Draft"}
+                                  </p>
+                                  <h4 className="break-words text-xl font-semibold text-white">
+                                    {draft.title}
+                                  </h4>
+                                </div>
+                                <span className="shrink-0 rounded-full border border-[#18C964]/20 bg-[#18C964]/10 px-3 py-1 text-xs font-semibold text-[#8ef0b5]">
+                                  {getStatusLabel(draft.status)}
+                                </span>
                               </div>
 
-                              <div className="mt-4 grid gap-2 text-sm text-slate-400 md:grid-cols-2">
+                              <div className="mt-4 grid gap-2 break-words text-sm text-slate-400 sm:grid-cols-2">
                                 <div>
                                   <span className="text-slate-500">Box:</span> {draft.productName || "—"}
                                 </div>
@@ -351,25 +355,17 @@ function HomeContent() {
                               </div>
                             </div>
 
-                            {draft.productImageUrl ? (
-                              <div className="flex min-h-[240px] max-h-[300px] items-center justify-center overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
-                                <img
-                                  src={draft.productImageUrl}
-                                  alt={draft.productName || draft.title}
-                                  className="h-full w-full object-contain"
-                                />
-                              </div>
-                            ) : null}
+                            <DraftBoxGallery draft={draft} />
                           </Link>
 
-                          <div className="mt-5 flex w-full items-center justify-between border-t border-slate-800 pt-4">
-                            <div>
+                          <div className="mt-5 flex w-full flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
+                            <div className="min-w-0">
                               <p className="text-sm text-slate-400">Kód draftu</p>
                               <p className="mt-1 font-mono text-xs font-semibold tracking-[0.2em] text-[#18C964] sm:text-sm">
                                 {draft.code}
                               </p>
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <button
                                 type="button"
                                 onClick={() => setDraftToDelete(draft)}
@@ -411,26 +407,26 @@ function HomeContent() {
                   </div>
 
                   {completedDrafts.length > 0 ? (
-                    <div className="grid gap-4 lg:grid-cols-2">
+                    <div className="grid gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,520px),1fr))]">
                       {completedDrafts.map((draft) => (
                         <div
                           key={draft.id}
-                          className="flex h-full flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_80px_rgba(2,6,23,0.4)] backdrop-blur-xl transition hover:-translate-y-0.5"
+                          className="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/80 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02),0_24px_80px_rgba(2,6,23,0.4)] backdrop-blur-xl transition hover:-translate-y-0.5"
                         >
-                          <Link href={`/draft/${draft.code}`} className="flex flex-1 flex-col gap-4">
-                            <div className="flex items-start justify-between gap-4">
-                              <div className="space-y-2">
+                          <Link href={`/draft/${draft.code}`} className="flex min-w-0 flex-1 flex-col gap-4">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1 basis-40 space-y-2">
                                 <p className="text-sm font-medium uppercase tracking-[0.24em] text-slate-500">
                                   {draft.sport || "NHL Draft"}
                                 </p>
-                                <h4 className="text-xl font-semibold text-white">{draft.title}</h4>
+                                <h4 className="break-words text-xl font-semibold text-white">{draft.title}</h4>
                               </div>
                               <span className="shrink-0 rounded-full border border-slate-500/20 bg-slate-500/10 px-3 py-1 text-xs font-semibold text-slate-300">
                                 {getStatusLabel(draft.status)}
                               </span>
                             </div>
 
-                            <div className="grid gap-2 text-sm text-slate-400 sm:grid-cols-2">
+                            <div className="grid gap-2 break-words text-sm text-slate-400 sm:grid-cols-2">
                               <div>
                                 <span className="text-slate-500">Box:</span> {draft.productName || "—"}
                               </div>
@@ -445,25 +441,17 @@ function HomeContent() {
                               </div>
                             </div>
 
-                            {draft.productImageUrl ? (
-                              <div className="flex min-h-[180px] items-center justify-center overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/70 p-3">
-                                <img
-                                  src={draft.productImageUrl}
-                                  alt={draft.productName || draft.title}
-                                  className="h-full w-full max-h-[220px] object-contain"
-                                />
-                              </div>
-                            ) : null}
+                            <DraftBoxGallery draft={draft} />
                           </Link>
 
-                          <div className="mt-5 flex w-full items-center justify-between border-t border-slate-800 pt-4">
-                            <div>
+                          <div className="mt-5 flex w-full flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
+                            <div className="min-w-0">
                               <p className="text-sm text-slate-400">Kód draftu</p>
                               <p className="mt-1 font-mono text-sm font-semibold tracking-[0.24em] text-[#18C964]">
                                 {draft.code}
                               </p>
                             </div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <button
                                 type="button"
                                 onClick={() => setDraftToDelete(draft)}

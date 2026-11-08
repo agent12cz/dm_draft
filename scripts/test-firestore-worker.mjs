@@ -140,6 +140,9 @@ function mockFetch({ draft, documentName, abortFirstCommit = false }) {
     }
 
     if (url.startsWith("https://firestore.googleapis.com/v1/") && url.includes("?transaction=")) {
+      if (url.includes("/documents/draftPrivate/")) {
+        return Response.json({ error: { status: "NOT_FOUND" } }, { status: 404 });
+      }
       return Response.json({
         name: documentName,
         fields: firestoreFields(latestDraft),

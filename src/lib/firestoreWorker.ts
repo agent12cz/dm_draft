@@ -45,6 +45,8 @@ export async function callFirestoreWorker<T>(
   if (!response.ok) {
     const reason = result?.status ?? result?.message ?? "worker-error";
     const messages: Record<string, string> = {
+      invalid: "Požadavek Firestore není platný.",
+      failed: "Požadavek se nepodařilo zpracovat na serveru. Zkuste akci opakovat.",
       forbidden: "K této operaci nemáte oprávnění.",
       conflict: "Draft se mezitím změnil. Zkontrolujte aktuální údaje a opakujte akci.",
       missing: "Požadovaný záznam nebyl nalezen.",
@@ -53,7 +55,9 @@ export async function callFirestoreWorker<T>(
     throw new FirestoreWorkerError(
       response.status,
       reason,
-      messages[reason] ?? `Operace Firestore selhala (${reason}).`,
+      reason === "invalid" && result?.message
+        ? `${messages.invalid} ${result.message}`
+        : messages[reason] ?? `Operace Firestore selhala (${reason}).`,
     );
   }
 

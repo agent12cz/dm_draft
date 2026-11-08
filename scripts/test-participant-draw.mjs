@@ -89,7 +89,6 @@ for (const name of [
   "handleRemoveUserFromParticipant",
   "handleJoinDraftFromCode",
   "handleSaveParticipantNames",
-  "handleUndoLastAction",
   "handleConfirmTeamReplacement",
   "moveParticipant",
 ]) {

@@ -196,7 +196,7 @@ function DraftDetailPageContent() {
   const [playerLinkCopyFeedback, setPlayerLinkCopyFeedback] = useState<string | null>(null);
   const [startDraftMessage, setStartDraftMessage] = useState<string | null>(null);
   const [userSearch, setUserSearch] = useState("");
-  const [matchingUsers, setMatchingUsers] = useState<Array<{ uid: string; displayName: string; email: string }>>([]);
+  const [matchingUsers, setMatchingUsers] = useState<Array<{ uid: string; displayName: string; email?: string }>>([]);
   const [selectedParticipantIndex, setSelectedParticipantIndex] = useState<number | null>(null);
   const [isSearchingUsers, setIsSearchingUsers] = useState(false);
   const [joinModalOpen, setJoinModalOpen] = useState(false);
@@ -227,6 +227,8 @@ function DraftDetailPageContent() {
     offset: number;
   } | null>(null);
   const drawingRef = useRef(false);
+  const [userSearchError, setUserSearchError] = useState<string | null>(null);
+  const [resultsTab, setResultsTab] = useState<"teams" | "history">("teams");
 
   const closeReplaceDialog = useCallback(() => {
     setReplaceSelection(null);
@@ -403,35 +405,39 @@ function DraftDetailPageContent() {
   }, [code]);
 
   useEffect(() => {
-    if (!draft || draft.status !== "waiting") {
-      return;
-    }
-
-    if (!userSearch.trim()) {
-      const clearTimeoutId = window.setTimeout(() => {
-        setMatchingUsers([]);
-      }, 0);
-      return () => window.clearTimeout(clearTimeoutId);
-    }
-
+    let active = true;
+    const draftId = draft?.id;
+    const shouldSearch = Boolean(draftId && draft?.status === "waiting" && selectedParticipantIndex !== null && userSearch.trim());
     const searchTimeout = window.setTimeout(async () => {
+      setMatchingUsers([]);
+      setUserSearchError(null);
+      if (!shouldSearch) {
+        setIsSearchingUsers(false);
+        return;
+      }
       setIsSearchingUsers(true);
       try {
-        const result = await callFirestoreWorker<{ users: Array<{ uid: string; displayName: string; email: string }> }>(
+        const result = await callFirestoreWorker<{ users: Array<{ uid: string; displayName: string; email?: string }> }>(
           "draft.search-users",
-          { draftId: draft.id, prefix: userSearch.trim() },
+          { draftId, prefix: userSearch.trim() },
         );
-        setMatchingUsers(result.users);
+        if (active) setMatchingUsers(result.users);
       } catch (searchError) {
         console.error(searchError);
-        setMatchingUsers([]);
+        if (active) {
+          setMatchingUsers([]);
+          setUserSearchError(searchError instanceof Error ? searchError.message : "Nepodařilo se vyhledat uživatele.");
+        }
       } finally {
-        setIsSearchingUsers(false);
+        if (active) setIsSearchingUsers(false);
       }
-    }, 250);
+    }, shouldSearch ? 250 : 0);
 
-    return () => window.clearTimeout(searchTimeout);
-  }, [draft, userSearch]);
+    return () => {
+      active = false;
+      window.clearTimeout(searchTimeout);
+    };
+  }, [draft?.id, draft?.status, selectedParticipantIndex, userSearch]);
 
   useEffect(() => {
     if (!replaceSelection) {
@@ -858,7 +864,7 @@ function DraftDetailPageContent() {
     }
   }
 
-  async function handleAssignUserToParticipant(participantIndex: number, userId: string, displayName: string, email: string) {
+  async function handleAssignUserToParticipant(participantIndex: number, userId: string, displayName: string, email = "") {
     if (!draft) {
       return;
     }
@@ -1183,51 +1189,6 @@ function DraftDetailPageContent() {
     }
 
     await handleSelectItem(availableItems[0]);
-  }
-
-  async function handleUndoLastAction() {
-    if (!draft || draft.history.length === 0) {
-      return;
-    }
-
-    const lastAction = draft.history[draft.history.length - 1];
-    const previousPickIndex = Math.max(0, draft.currentPickIndex - 1);
-    const updatedHistory = draft.history.slice(0, -1);
-
-    let nextParticipants = draft.participants;
-    let nextAvailableItemIds = draft.availableItemIds;
-
-    if (lastAction.type === "pick" && lastAction.itemId) {
-      nextParticipants = draft.participants.map((participant, index) => {
-        if (index !== lastAction.participantIndex) {
-          return participant;
-        }
-
-        return {
-          ...participant,
-          picks: participant.picks.filter((pickedItemId) => pickedItemId !== lastAction.itemId),
-        };
-      });
-      nextAvailableItemIds = [...draft.availableItemIds, lastAction.itemId];
-    }
-
-    setIsUpdating(true);
-    setError(null);
-    try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
-        status: "drafting",
-        participants: nextParticipants,
-        currentPickIndex: previousPickIndex,
-        availableItemIds: nextAvailableItemIds,
-        history: updatedHistory,
-      }, normalizeParticipant, { checkTurn: true });
-    } catch (undoError) {
-      console.error(undoError);
-      setError(participantUpdateMessage(undoError, "Nepodařilo se vrátit poslední tah."));
-    } finally {
-      setIsUpdating(false);
-    }
   }
 
   function openReplaceDialog(participantIndex: number, participantName: string, currentItemId: string, currentItemName: string, currentPickIndex: number) {
@@ -1718,7 +1679,7 @@ function DraftDetailPageContent() {
               <p className="text-sm font-semibold text-[#8ef0b5]">Pořadí vylosováno</p>
             ) : null}
             <fieldset disabled={Boolean(drawAnimation)} className="min-w-0 space-y-4">
-            <div className="grid items-start gap-2 md:grid-cols-2">
+            <div className="space-y-2">
               {(drawAnimation
                 ? drawAnimation.participants.map((_, index, participants) => participants[(index + drawAnimation.offset) % participants.length])
                 : draft.participants).map((participant, index) => {
@@ -1739,7 +1700,7 @@ function DraftDetailPageContent() {
                 return (
                 <div key={participant.id} className={`rounded-xl border p-3 ${isCurrentTurn ? "border-[#18C964]/40 bg-[#18C964]/5" : "border-slate-800 bg-slate-950/70"}`}>
                   <div className="flex items-start gap-2">
-                    <details className="min-w-0 flex-1">
+                    <details className="group min-w-0 flex-1" data-participant-accordion>
                       <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 [&::-webkit-details-marker]:hidden">
                         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-300">{index + 1}</span>
                         <span className="min-w-0 flex-1 truncate font-semibold text-white">{participant.displayName || participant.name || `Účastník ${index + 1}`}</span>
@@ -1747,6 +1708,7 @@ function DraftDetailPageContent() {
                           {participantStatusLabel}
                         </span>
                         <span className="whitespace-nowrap text-xs text-slate-400">{participant.picks.length} týmů</span>
+                        <span aria-hidden="true" className="text-slate-400 transition-transform group-open:rotate-180">⌄</span>
                       </summary>
                       <div className="mt-3 space-y-3 border-t border-slate-800 pt-3">
                   <input
@@ -1791,13 +1753,20 @@ function DraftDetailPageContent() {
                         Najít registrovaného uživatele
                         <input
                           value={userSearch}
-                          onChange={(event) => setUserSearch(event.target.value)}
+                          onChange={(event) => {
+                            setUserSearch(event.target.value);
+                            setMatchingUsers([]);
+                            setUserSearchError(null);
+                            setIsSearchingUsers(Boolean(event.target.value.trim()));
+                          }}
                           placeholder="Jméno nebo e-mail"
                           className="rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-[#18C964]/50"
                         />
                       </label>
                       <div className="mt-3 space-y-2">
-                        {isSearchingUsers ? (
+                        {userSearchError ? (
+                          <p role="alert" className="text-sm text-red-300">{userSearchError}</p>
+                        ) : isSearchingUsers ? (
                           <p className="text-sm text-slate-400">Vyhledávám uživatele...</p>
                         ) : matchingUsers.length > 0 ? (
                           matchingUsers.map((candidate) => (
@@ -1846,8 +1815,6 @@ function DraftDetailPageContent() {
                       Vygenerovat PIN
                     </button>
                   </div>
-                      </div>
-                    </details>
                     <div className="flex shrink-0 gap-1">
                       <button
                         type="button"
@@ -1868,6 +1835,8 @@ function DraftDetailPageContent() {
                         ↓
                       </button>
                     </div>
+                      </div>
+                    </details>
                   </div>
                 </div>
                 );
@@ -2095,14 +2064,6 @@ function DraftDetailPageContent() {
                     </button>
                   </>
                 ) : null}
-                <button
-                  type="button"
-                  onClick={() => void handleUndoLastAction()}
-                  disabled={isUpdating || draft.history.length === 0}
-                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  Vrátit poslední tah
-                </button>
               </div>
               {draft.status !== "completed" ? (
               <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
@@ -2191,10 +2152,24 @@ function DraftDetailPageContent() {
               </Card>
 
               <Card className="min-w-0 space-y-3">
-                <div>
-                  <h2 className="text-xl font-semibold text-white">Vybrané týmy</h2>
-                  <p className="text-xs text-slate-400">Rozbalte účastníka pro zobrazení a úpravu týmů.</p>
+                <div role="tablist" aria-label="Přehled výběrů" className="flex gap-2 border-b border-slate-800 pb-3">
+                  {([["teams", "Vybrané týmy"], ["history", "Historie draftu"]] as const).map(([tab, label]) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      role="tab"
+                      id={`admin-${tab}-tab`}
+                      aria-selected={resultsTab === tab}
+                      aria-controls={`admin-${tab}-panel`}
+                      onClick={() => setResultsTab(tab)}
+                      className={`rounded-xl px-3 py-2 text-sm font-semibold transition ${resultsTab === tab ? "bg-[#18C964]/15 text-[#8ef0b5]" : "text-slate-400 hover:bg-slate-800 hover:text-white"}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
+                <div role="tabpanel" id="admin-teams-panel" aria-labelledby="admin-teams-tab" hidden={resultsTab !== "teams"}>
+                  <p className="text-xs text-slate-400">Rozbalte účastníka pro zobrazení a úpravu týmů.</p>
                 <div className="max-h-[28rem] space-y-2 overflow-y-auto overscroll-contain pr-1">
                   {draft.participants.some((participant) => participant.picks.length > 0) ? (
                     draft.participants.map((participant, participantIndex) => participant.picks.length > 0 ? (
@@ -2235,14 +2210,9 @@ function DraftDetailPageContent() {
                     <p className="text-sm text-slate-400">Zatím nebyl vybrán žádný tým.</p>
                   )}
                 </div>
-              </Card>
-
-              <Card className="!p-0">
-                <details>
-                  <summary className="cursor-pointer list-none p-4 [&::-webkit-details-marker]:hidden">
-                    <span className="font-semibold text-white">Historie draftu</span>
-                    <span className="ml-2 text-xs text-slate-400">{historyEntries.length} akcí · nejnovější nahoře</span>
-                  </summary>
+                </div>
+                <div role="tabpanel" id="admin-history-panel" aria-labelledby="admin-history-tab" hidden={resultsTab !== "history"}>
+                  <p className="mb-3 text-xs text-slate-400">{historyEntries.length} akcí · nejnovější nahoře</p>
                   <div className="max-h-96 space-y-3 overflow-y-auto overscroll-contain px-4 pb-4">
                     {historyEntries.length > 0 ? (
                       historyEntries.map((entry, index) => {
@@ -2327,7 +2297,7 @@ function DraftDetailPageContent() {
                       <p className="text-sm text-slate-400">Zatím žádná historie.</p>
                     )}
                   </div>
-                </details>
+                </div>
               </Card>
 
             </div>

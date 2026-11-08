@@ -244,6 +244,34 @@ function createFirestoreMock(initialDraft) {
 
 console.log("Running instant automatic pick tests...");
 
+for (const trigger of ["immediate", "cron"]) {
+  for (const identity of [
+    { userId: "player-1" },
+    { userId: "", uid: "player-1" },
+    { uid: "player-1" },
+  ]) {
+    const mock = createFirestoreMock(expiredDraftFixture({
+      participants: [
+        { id: "participant-1", name: "Player 1", picks: [], ...identity },
+        { id: "participant-2", userId: "player-2", name: "Player 2", picks: [] },
+      ],
+      playerPriorities: { "player-1": ["team-a", "team-b"] },
+    }));
+    if (trigger === "immediate") {
+      const result = await runImmediateDraftPick(
+        workerEnv, { draftId: "ABCDE", userId: "player-1", expectedPickIndex: 0 }, mock.fetchMock,
+      );
+      assert.equal(result.status, "picked");
+    } else {
+      assert.equal((await runExpiredDraftPicks(workerEnv, mock.fetchMock)).picked, 1);
+    }
+    assert.equal(mock.getDraft().history.at(-1).itemId, "team-a");
+    assert.equal(mock.getDraft().history.at(-1).autoPickReason, "player-priorities");
+    assert.deepEqual(mock.getDraft().participants[0].picks, ["team-a"]);
+  }
+  console.log(`✓ ${trigger}: legacy drafts without a private document support canonical userId and legacy UID priorities`);
+}
+
 {
   const teams = Array.from({ length: 10 }, (_, index) => ({
     id: `team-${index}`,

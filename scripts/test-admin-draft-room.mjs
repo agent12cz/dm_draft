@@ -18,13 +18,15 @@ let stateIndex = 0;
 let captureEffects = false;
 let snapshotListener;
 let snapshotDraft;
+let resultsTab = "teams";
 const effects = [];
 const hooks = {
   useState(initial) {
     const index = stateIndex++;
     const overrides = [fixture, false, now, fixture.participants.map((participant) => participant.name)];
-    return [index < overrides.length ? overrides[index] : typeof initial === "function" ? initial() : initial,
-      (value) => { if (index === 0) snapshotDraft = value; }];
+    const isResultsTab = initial === "teams";
+    return [isResultsTab ? resultsTab : index < overrides.length ? overrides[index] : typeof initial === "function" ? initial() : initial,
+      (value) => { if (index === 0) snapshotDraft = value; if (isResultsTab) resultsTab = value; }];
   },
   useEffect(callback) { if (captureEffects) effects.push(callback); },
   useRef: (initial) => ({ current: initial }),
@@ -101,9 +103,10 @@ function createDraft(picks) {
   };
 }
 
-function render(picks, boxes) {
+function render(picks, boxes, status) {
   fixture = createDraft(picks);
   if (boxes !== undefined) fixture.boxes = boxes;
+  if (status !== undefined) fixture.status = status;
   stateIndex = 0;
   return renderToStaticMarkup(React.createElement(testModule.exports.TestContent));
 }
@@ -116,7 +119,7 @@ assert.match(active, /30 s/);
 assert.match(active, /Tým 10/);
 assert.equal((active.match(/data-test="chat"/g) ?? []).length, 1);
 assert.ok(active.indexOf("data-test=\"chat\"") < active.indexOf("Účastníci</h2>"));
-assert.ok(active.indexOf("Vrátit poslední tah") < active.indexOf("Dostupné týmy"));
+assert.doesNotMatch(active, /Vrátit poslední tah/);
 assert.match(active, /Přeskočit účastníka/);
 assert.match(active, /Vybrat tým za aktuálního účastníka/);
 for (let index = 1; index <= 8; index += 1) assert.match(active, new RegExp(`Hráč ${index}`));
@@ -126,15 +129,40 @@ assert.match(active, /Box A/);
 assert.match(active, /Box B/);
 console.log("✓ Eight-player active draft shows the current turn, timer, last pick, chat, controls and full box images");
 
+assert.match(active, /role="tablist" aria-label="Přehled výběrů"/);
+assert.match(active, /id="admin-teams-panel" aria-labelledby="admin-teams-tab"(?! hidden)/);
+assert.match(active, /id="admin-history-panel" aria-labelledby="admin-history-tab" hidden/);
+resultsTab = "history";
+const historyTab = render(10);
+assert.match(historyTab, /id="admin-history-panel" aria-labelledby="admin-history-tab"(?! hidden)/);
+assert.match(historyTab, /id="admin-teams-panel" aria-labelledby="admin-teams-tab" hidden/);
+const historyPanel = historyTab.slice(historyTab.indexOf('id="admin-history-panel"'));
+assert.ok(historyPanel.indexOf("Tým 10") < historyPanel.indexOf("Tým 9"));
+resultsTab = "teams";
+assert.equal((active.match(/data-participant-accordion="true"/g) ?? []).length, 8);
+assert.doesNotMatch(active, /<details[^>]*data-participant-accordion[^>]* open/);
+const accordion = active.match(/<details[^>]*data-participant-accordion[^>]*>([\s\S]*?)<\/details>/)?.[1];
+assert.match(accordion, /<summary[\s\S]*?Hráč 1[\s\S]*?Připojen[\s\S]*?1 týmů[\s\S]*?<\/summary>/);
+assert.doesNotMatch(accordion.match(/<summary[\s\S]*?<\/summary>/)?.[0] ?? "", /Posunout|Přiřadit|Vygenerovat/);
+assert.match(accordion, /aria-label="Posunout účastníka 1 nahoru"[^>]*disabled=""/);
+assert.match(accordion, /placeholder="Jméno účastníka 1" disabled=""/);
+assert.match(accordion, /Vygenerovat PIN/);
+assert.doesNotMatch(source, /handleUndoLastAction|Vrátit poslední tah/);
+const waiting = render(0, undefined, "waiting");
+assert.match(waiting, /placeholder="Jméno účastníka 1"(?! disabled="")/);
+assert.doesNotMatch(waiting, /aria-label="Posunout účastníka 1 dolů"[^>]*disabled=""/);
+assert.doesNotMatch(waiting, /<button[^>]*disabled=""[^>]*>\s*Přiřadit uživatele/);
+console.log("✓ Results share two switchable panels; participant accordions start closed and retain controls with post-start locks");
+
 const completed = render(32);
 assert.match(completed, /Draft dokončen/);
 assert.match(completed, /Dokončené výběry: 32 z 32/);
 assert.match(completed, /Tým 32/);
-assert.match(completed, /Vrátit poslední tah/);
+assert.doesNotMatch(completed, /Vrátit poslední tah/);
 assert.doesNotMatch(completed, /Přeskočit účastníka|Vybrat tým za aktuálního účastníka|Dostupné týmy|>Změnit<\/button>/);
 assert.doesNotMatch(completed, /Tah 33 z 32|Kolo 5/);
 assert.equal((completed.match(/data-test="chat"/g) ?? []).length, 1);
-console.log("✓ Completed 32-pick draft keeps undo and chat while hiding unavailable pick and replacement actions");
+console.log("✓ Completed 32-pick draft keeps chat without undo or unavailable pick and replacement actions");
 
 for (const [boxes, expected] of [
   [[{ productName: "Jeden box", productSeason: "2025/26", boxCount: 1, boxPrice: 999 }], ["Celkem: 1 box", "1× Jeden box", "2025/26"]],

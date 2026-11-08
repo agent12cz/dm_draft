@@ -51,13 +51,33 @@ type FirestoreTimestamp = {
   value: string;
 };
 
-class FirestoreHttpError extends Error {
+export class FirestoreHttpError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly operation?: string,
+    readonly reason?: string,
   ) {
     super(message);
   }
+}
+
+async function upstreamError(response: Response, operation: string) {
+  const responseText = await response.text();
+  let reason = "UNKNOWN";
+  try {
+    const parsed: unknown = JSON.parse(responseText);
+    const status = isRecord(parsed) && isRecord(parsed.error) ? parsed.error.status : undefined;
+    if (typeof status === "string" && /^[A-Z_]{1,64}$/.test(status)) reason = status;
+  } catch {
+    // Upstream errors need not be JSON; never include their raw bodies in diagnostics.
+  }
+  return new FirestoreHttpError(
+    `${operation} failed with HTTP ${response.status} (${reason}).`,
+    response.status,
+    operation,
+    reason,
+  );
 }
 
 let cachedAccessToken: { email: string; token: string; expiresAt: number } | null = null;
@@ -165,11 +185,7 @@ async function getAccessToken(env: DraftWorkerEnv, request: typeof fetch) {
 
 async function readJsonResponse<T>(response: Response, operation: string): Promise<T> {
   if (!response.ok) {
-    const responseText = await response.text();
-    throw new FirestoreHttpError(
-      `${operation} failed with HTTP ${response.status}: ${responseText.slice(0, 500)}`,
-      response.status,
-    );
+    throw await upstreamError(response, operation);
   }
 
   return (await response.json()) as T;
@@ -177,11 +193,7 @@ async function readJsonResponse<T>(response: Response, operation: string): Promi
 
 async function readJsonStream(response: Response, operation: string) {
   if (!response.ok) {
-    const responseText = await response.text();
-    throw new FirestoreHttpError(
-      `${operation} failed with HTTP ${response.status}: ${responseText.slice(0, 500)}`,
-      response.status,
-    );
+    throw await upstreamError(response, operation);
   }
 
   const responseText = await response.text();
@@ -601,14 +613,19 @@ async function processExpiredDraft(
         return { status: "not-expired" };
       }
 
-      const draft = decodeDraft({
-        ...fields,
-        playerPriorities: privateFields.playerPriorities ?? fields.playerPriorities,
-      });
+      const draft = decodeDraft(fields);
       if (!draft) {
         return { status: "invalid" };
       }
-      const pickUpdate = buildAutomaticPickUpdate(draft);
+      const pickUpdate = buildAutomaticPickUpdate({
+        ...draft,
+        participants: draft.participants.map((participant, index) => ({
+          ...participant,
+          userId: privateFields.participants?.[index]?.userId ?? "",
+          priorities: privateDocument ? undefined : participant.priorities,
+        })),
+        playerPriorities: privateFields.playerPriorities,
+      });
       if (!pickUpdate) {
         if (getDraftStatusAfterPick(draft.availableItemIds) !== "completed") {
           return { status: "invalid" };
@@ -646,6 +663,10 @@ async function processExpiredDraft(
         return { status: "completed" };
       }
 
+      pickUpdate.participants = draft.participants.map((participant, index) => ({
+        ...participant,
+        picks: pickUpdate.participants[index].picks,
+      }));
       const commitResponse = await request(`${baseUrl}:commit`, {
         method: "POST",
         headers: {
@@ -874,6 +895,13 @@ function plainValue(value: unknown): unknown {
   return value;
 }
 
+function participantUserId(participant: Record<string, unknown>): string {
+  if (typeof participant.userId === "string" && participant.userId.trim()) {
+    return participant.userId.trim();
+  }
+  return typeof participant.uid === "string" ? participant.uid.trim() : "";
+}
+
 function privateFromLegacyFields(fields: Record<string, unknown>): DraftPrivateFields {
   const participants = Array.isArray(fields.participants) ? fields.participants : [];
   return {
@@ -881,11 +909,7 @@ function privateFromLegacyFields(fields: Record<string, unknown>): DraftPrivateF
     participants: participants.map((participant) => {
       if (!isRecord(participant)) return {};
       return {
-        userId: typeof participant.userId === "string"
-          ? participant.userId
-          : typeof participant.uid === "string"
-            ? participant.uid
-            : "",
+        userId: participantUserId(participant),
         email: typeof participant.email === "string" ? participant.email : "",
         participantId: typeof participant.participantId === "string" ? participant.participantId : "",
         participantPin: typeof participant.participantPin === "string" ? participant.participantPin : null,
@@ -907,7 +931,10 @@ function privateFieldsForDraft(
     return {
       ownerUserId: typeof stored.ownerUserId === "string" ? stored.ownerUserId : null,
       participants: Array.isArray(stored.participants)
-        ? stored.participants.filter(isRecord) as DraftPrivateParticipant[]
+        ? stored.participants.filter(isRecord).map((participant) => ({
+            ...participant,
+            userId: participantUserId(participant),
+          }))
         : [],
       playerPriorities: decodePriorities(stored.playerPriorities),
     };
@@ -1129,12 +1156,14 @@ function participantParts(
   for (let index = 0; index < incoming.length; index += 1) {
     const participant = requireRecord(incoming[index], "Invalid participant.");
     const oldPrivate = previous[index] ?? {};
-    const userIdValue = participant.userId ?? participant.uid ?? oldPrivate.userId ?? "";
+    const userIdValue = participant.userId === ""
+      ? participant.uid ?? ""
+      : participant.userId ?? participant.uid ?? oldPrivate.userId ?? "";
     if (typeof userIdValue !== "string" || userIdValue.length > 128) {
       throw new FirestoreSecurityError(400, "Invalid participant user ID.");
     }
 
-    const userId = userIdValue.trim();
+    const userId = participantUserId({ ...participant, userId: userIdValue });
     const privateParticipant: DraftPrivateParticipant = {
       userId,
       email: typeof participant.email === "string" ? participant.email : oldPrivate.email ?? "",
@@ -1174,7 +1203,11 @@ async function resolveParticipantEmails(
     }
     resolved.push({
       ...participant,
-      email: typeof profile?.email === "string" ? profile.email : participant.email ?? "",
+      email: typeof profile?.email === "string"
+        ? profile.email
+        : userId === oldUserId
+          ? previous[index]?.email ?? ""
+          : "",
     });
   }
   return resolved;
@@ -1476,7 +1509,7 @@ async function createDraft(
     const updates = requireRecord(body.updates, "Invalid draft update.");
 
     for (const key of Object.keys(updates)) {
-      if (!DRAFT_PUBLIC_UPDATE_FIELDS.has(key) || key === "participantOrderDrawn") {
+      if (!DRAFT_PUBLIC_UPDATE_FIELDS.has(key) || key === "participantOrderDrawn" || key === "currentPickIndex") {
         throw new FirestoreSecurityError(400, `Draft field cannot be changed: ${key}.`);
       }
     }
@@ -1489,6 +1522,20 @@ async function createDraft(
 
       const options = isRecord(body.options) ? body.options : {};
       const currentStatus = typeof context.fields.status === "string" ? context.fields.status : "waiting";
+      const currentHistory = Array.isArray(context.fields.history) ? context.fields.history : [];
+      if (updates.history !== undefined && (
+        !Array.isArray(updates.history) ||
+        updates.history.length < currentHistory.length ||
+        !sameSecurityValue(updates.history.slice(0, currentHistory.length), currentHistory)
+      )) {
+        throw new FirestoreSecurityError(409, "Draft history cannot be rewound or overwritten.");
+      }
+      if (updates.availableItemIds !== undefined && (
+        !Array.isArray(updates.availableItemIds) ||
+        updates.availableItemIds.length > (Array.isArray(context.fields.availableItemIds) ? context.fields.availableItemIds.length : 0)
+      )) {
+        throw new FirestoreSecurityError(409, "Picked teams cannot be returned by undoing a turn.");
+      }
       if (options.waiting === true && currentStatus !== "waiting") {
         throw new FirestoreSecurityError(409, "This operation is only allowed before the draft starts.");
       }
@@ -1534,6 +1581,14 @@ async function createDraft(
           updates.participants,
           context.privateFields.participants,
         );
+        const currentParticipants = Array.isArray(context.fields.participants) ? context.fields.participants : [];
+        if (currentParticipants.some((previous) => {
+          if (!isRecord(previous) || !Array.isArray(previous.picks) || previous.picks.length === 0) return false;
+          const participant = publicParticipants.find((entry) => entry.id === previous.id);
+          return !participant || !Array.isArray(participant.picks) || participant.picks.length < previous.picks.length;
+        })) {
+          throw new FirestoreSecurityError(409, "Participant picks cannot be removed by undoing a turn.");
+        }
         if (publicParticipants.length !== Number(context.fields.participantCount ?? publicParticipants.length)) {
           throw new FirestoreSecurityError(400, "Participant count does not match the draft.");
         }
@@ -1859,6 +1914,9 @@ async function createDraft(
     body: Record<string, unknown>,
   ) {
     const draftId = requireString(body.draftId, "draft ID", 128);
+    if (Object.keys(body).some((key) => !["operation", "draftId", "priorities"].includes(key))) {
+      throw new FirestoreSecurityError(400, "Player priorities may only target the authenticated user.");
+    }
     const priorities = stringArray(body.priorities);
     if (!Array.isArray(body.priorities) || priorities.length > 100 || priorities.some((id) => id.length > 128)) {
       throw new FirestoreSecurityError(400, "Invalid player priorities.");
@@ -1954,8 +2012,14 @@ async function createDraft(
     ) || draft.fields.status !== "waiting") {
       throw new FirestoreSecurityError(403, "Only the draft owner may search users.");
     }
-    const prefixEnd = `${prefix}\uf8ff`;
-    const prefixRange = (fieldPath: string) => ({
+    const lowerPrefix = prefix.toLowerCase();
+    const variants = [...new Set([
+      prefix,
+      lowerPrefix,
+      prefix.toUpperCase(),
+      lowerPrefix.charAt(0).toUpperCase() + lowerPrefix.slice(1),
+    ])];
+    const prefixRange = (fieldPath: string, value: string) => ({
       compositeFilter: {
         op: "AND",
         filters: [
@@ -1963,45 +2027,40 @@ async function createDraft(
             fieldFilter: {
               field: { fieldPath },
               op: "GREATER_THAN_OR_EQUAL",
-              value: { stringValue: prefix },
+              value: { stringValue: value },
             },
           },
           {
             fieldFilter: {
               field: { fieldPath },
               op: "LESS_THAN_OR_EQUAL",
-              value: { stringValue: prefixEnd },
+              value: { stringValue: `${value}\uf8ff` },
             },
           },
         ],
       },
     });
-    const response = await request(
-      `${firestoreDocumentsUrl(projectId)}:runQuery`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${accessToken}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          structuredQuery: {
-            from: [{ collectionId: "users" }],
-            where: {
-              compositeFilter: {
-                op: "OR",
-                filters: [
-                  prefixRange("displayName"),
-                  prefixRange("email"),
-                ],
-              },
-            },
-            limit: 20,
+    const results = (await Promise.all(["displayName", "email"].flatMap((fieldPath) =>
+      variants.map(async (value) => {
+        const response = await request(`${firestoreDocumentsUrl(projectId)}:runQuery`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${accessToken}`,
+            "content-type": "application/json",
           },
-        }),
-      },
-    );
-    const results = await readJsonStream(response, "Firestore user search");
+          body: JSON.stringify({
+            structuredQuery: {
+              from: [{ collectionId: "users" }],
+              select: { fields: [{ fieldPath: "displayName" }, { fieldPath: "email" }] },
+              where: prefixRange(fieldPath, value),
+              orderBy: [{ field: { fieldPath }, direction: "ASCENDING" }],
+              limit: 20,
+            },
+          }),
+        });
+        return readJsonStream(response, "Firestore user search");
+      }),
+    ))).flat();
     const seen = new Set<string>();
     const users = results.flatMap((result) => {
       const document = asDocument(result);
@@ -2016,10 +2075,9 @@ async function createDraft(
       return [{
         uid,
         displayName: typeof user.displayName === "string" ? user.displayName : "",
-        email: typeof user.email === "string" ? user.email : "",
       }];
     });
-    return { users };
+    return { users: users.slice(0, 20) };
   }
 
   async function deleteDraft(

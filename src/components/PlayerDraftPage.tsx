@@ -12,8 +12,12 @@ import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import { getTimeLeftForTurn, getTurnKey, type TurnCountdown } from "@/lib/turnCountdown";
 import { startInstantAutoPick } from "@/lib/instantAutoPick";
+import { usePlayerSounds } from "@/lib/playerSounds";
 import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
+import { PickAnnouncement } from "@/components/PickAnnouncement";
+import { PickHistoryTracker, type PickAnnouncement as PickEvent } from "@/lib/pickAnnouncements";
+import { getNhlTeamNameLines } from "@/lib/nhlTeamNames";
 
 type DraftParticipant = {
   id: string;
@@ -174,13 +178,7 @@ export default function PlayerDraftPage() {
   const [isLoading, setIsLoading] = useState(Boolean(code));
   const [error, setError] = useState<string | null>(null);
   const [isSubmittingPick, setIsSubmittingPick] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
-    if (typeof window === "undefined") {
-      return true;
-    }
-
-    return window.localStorage.getItem("dm-draft-sound-enabled") !== "false";
-  });
+  const [soundEnabled, setSoundEnabled] = useState(true);
   const [turnCountdown, setTurnCountdown] = useState<TurnCountdown | null>(null);
   const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false);
   const [teamSearch, setTeamSearch] = useState("");
@@ -203,6 +201,10 @@ export default function PlayerDraftPage() {
   const [autoPickFeedback, setAutoPickFeedback] = useState<{ turnKey: string; message: string } | null>(null);
   const hasInitializedTurnNotificationRef = useRef(false);
   const notificationPermissionRequestedRef = useRef(false);
+  const [pickAnnouncements, setPickAnnouncements] = useState<PickEvent[]>([]);
+  const finishPickAnnouncement = useCallback((id: string) => {
+    setPickAnnouncements((queue) => queue.filter((event) => event.id !== id));
+  }, []);
   const turnStartedAtMs = draft?.turnStartedAt?.toDate
     ? draft.turnStartedAt.toDate().getTime()
     : null;
@@ -220,6 +222,8 @@ export default function PlayerDraftPage() {
 
     let isMounted = true;
     let unsubscribe: (() => void) | null = null;
+    const pickHistory = new PickHistoryTracker();
+    let pendingAnnouncements: PickEvent[] = [];
 
     void (async () => {
       try {
@@ -228,6 +232,7 @@ export default function PlayerDraftPage() {
           return;
         }
 
+        setPickAnnouncements([]);
         const draftRef = firestoreApi.doc(db, "publicDrafts", code);
         let lastObservedTurn: string | null = null;
         let snapshotRevision = 0;
@@ -242,8 +247,19 @@ export default function PlayerDraftPage() {
               setIsLoading(false);
               return;
             }
+            const announcementScope = `${snapshot.id}:${user.uid}`;
+            pendingAnnouncements.push(...pickHistory.observe(announcementScope, {
+              history: (data.history ?? []) as DraftHistoryItem[],
+              participants: (data.participants ?? []) as DraftParticipant[],
+              draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map(normalizeDraftItem),
+            }, snapshot.metadata));
             void getDraftPrivateAccess(snapshot.id).then((access) => {
               if (!isMounted || snapshotRevision !== currentRevision) return;
+              if (access.authorized && pendingAnnouncements.length > 0) {
+                const confirmed = pendingAnnouncements;
+                pendingAnnouncements = [];
+                setPickAnnouncements(confirmed.slice(-1));
+              }
             const turnStartedAtValue = data.turnStartedAt;
             const hasToDate = typeof turnStartedAtValue === "object"
               && turnStartedAtValue !== null
@@ -319,6 +335,7 @@ export default function PlayerDraftPage() {
         };
         unsubscribe = firestoreApi.onSnapshot(
           draftRef,
+          { includeMetadataChanges: true },
           handleSnapshot,
           (loadError) => {
             console.error(loadError);
@@ -490,19 +507,7 @@ export default function PlayerDraftPage() {
       }
     }
 
-    if (soundEnabled) {
-      const playSound = async () => {
-        try {
-          const audio = new Audio("/sounds/your-turn.mp3");
-          await audio.play();
-        } catch {
-          // Zvuk není dostupný, přeskakujeme bez rozbití UI.
-        }
-      };
-
-      void playSound();
-    }
-  }, [draft, soundEnabled, user]);
+  }, [draft, user]);
 
   const availableItems = useMemo(() => {
     if (!draft) {
@@ -581,6 +586,17 @@ export default function PlayerDraftPage() {
       currentParticipant?.userId === user.uid &&
       !isSubmittingPick &&
       !isTurnExpired,
+  );
+  const sounds = usePlayerSounds(
+    draft && user && currentTurnKey ? {
+      scope: `${draft.id}:${user.uid}`,
+      key: `${draft.id}-${draft.currentPickIndex}`,
+      ownTurn: isCurrentUserTurn && !isCompleted && !isSubmittingPick && !isTurnExpired,
+      enabled: soundEnabled,
+      startedAt: turnStartedAtMs,
+      durationSeconds: draft.turnDurationSeconds,
+    } : null,
+    setSoundEnabled,
   );
 
   const autoPickDraftId = draft?.id;
@@ -803,22 +819,25 @@ export default function PlayerDraftPage() {
         draftId: draft.id,
         priorities: order,
       });
-
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
-      }
-
-      setSavedPrioritiesOrder(order);
-      setMyPrioritiesOrder(order);
-      setPrioritiesFeedback("✓ Vaše priority byly úspěšně uloženy.");
     } catch (err) {
       console.error("Error saving priorities:", err);
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
-      }
-      setPrioritiesFeedback("Priority byly uloženy v tomto prohlížeči.");
+      const message = err instanceof Error ? err.message : "Zkuste akci opakovat.";
+      setPrioritiesFeedback(`Nepodařilo se uložit priority do draftu. ${message}`);
+      return;
     } finally {
       setIsSavingPriorities(false);
+    }
+
+    setSavedPrioritiesOrder(order);
+    setMyPrioritiesOrder(order);
+    setPrioritiesFeedback("✓ Vaše priority byly úspěšně uloženy.");
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
+      } catch (cacheError) {
+        console.error("Error caching saved priorities:", cacheError);
+        setPrioritiesFeedback("✓ Vaše priority byly uloženy do draftu, ale kopii v prohlížeči se nepodařilo uložit.");
+      }
     }
   }
 
@@ -838,6 +857,7 @@ export default function PlayerDraftPage() {
       return;
     }
 
+    sounds.stop();
     setIsSubmittingPick(true);
     setError(null);
 
@@ -856,15 +876,6 @@ export default function PlayerDraftPage() {
       }
     } finally {
       setIsSubmittingPick(false);
-    }
-  }
-
-  function toggleSound() {
-    const nextEnabled = !soundEnabled;
-    setSoundEnabled(nextEnabled);
-
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem("dm-draft-sound-enabled", String(nextEnabled));
     }
   }
 
@@ -979,6 +990,9 @@ export default function PlayerDraftPage() {
     <div className="min-h-screen text-slate-100">
       <Navbar />
 
+      {pickAnnouncements[0]?.scope === `${draft.id}:${user?.uid}` && hasPlayAccess ? (
+        <PickAnnouncement key={pickAnnouncements[0].id} event={pickAnnouncements[0]} onComplete={finishPickAnnouncement} />
+      ) : null}
       <PageContainer className="py-6 lg:py-8">
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 sm:gap-6">
           {/* Sticky Alert for Mobile when Current User is on turn */}
@@ -1023,12 +1037,16 @@ export default function PlayerDraftPage() {
                 </div>
                 <button
                   type="button"
-                  onClick={toggleSound}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  onClick={sounds.toggle}
+                  aria-pressed={soundEnabled}
                   className="rounded-2xl border border-slate-700/80 bg-slate-950/80 px-3.5 py-2 text-xs font-bold text-slate-200 transition hover:border-[#18C964]/40 hover:bg-slate-800"
                   title={soundEnabled ? "Vypnout zvuk" : "Zapnout zvuk"}
                 >
                   {soundEnabled ? "🔊 Zvuk ZAP" : "🔇 Zvuk VYP"}
                 </button>
+                {sounds.error ? <p role="alert" className="text-xs text-red-300">{sounds.error}</p> : null}
               </div>
             </div>
 
@@ -1566,8 +1584,10 @@ export default function PlayerDraftPage() {
                                     />
                                   </div>
 
-                                  <p className="mt-2.5 line-clamp-2 text-xs font-bold leading-tight text-white transition group-hover:text-[#8ef0b5] sm:text-sm">
-                                    {item.name}
+                                  <p className="mt-2.5 min-h-[2.5em] w-full min-w-0 text-xs font-bold leading-tight text-white transition group-hover:text-[#8ef0b5] sm:text-sm">
+                                    {getNhlTeamNameLines(item).map((line, index) => (
+                                      <span key={index} className="block truncate" title={line}>{line}</span>
+                                    ))}
                                   </p>
 
                                   <div className="mt-3.5 w-full">
