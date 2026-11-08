@@ -121,7 +121,7 @@ assert.equal((active.match(/data-test="chat"/g) ?? []).length, 1);
 assert.ok(active.indexOf("data-test=\"chat\"") < active.indexOf("Účastníci</h2>"));
 assert.doesNotMatch(active, /Vrátit poslední tah/);
 assert.match(active, /Přeskočit účastníka/);
-assert.match(active, /Vybrat tým za aktuálního účastníka/);
+assert.doesNotMatch(active, /Vybrat tým za aktuálního účastníka|Dostupné týmy/);
 for (let index = 1; index <= 8; index += 1) assert.match(active, new RegExp(`Hráč ${index}`));
 assert.match(active, /src="\/box-a\.png"[^>]*object-contain/);
 assert.match(active, /src="\/box-b\.png"[^>]*object-contain/);
@@ -138,6 +138,8 @@ assert.match(historyTab, /id="admin-history-panel" aria-labelledby="admin-histor
 assert.match(historyTab, /id="admin-teams-panel" aria-labelledby="admin-teams-tab" hidden/);
 const historyPanel = historyTab.slice(historyTab.indexOf('id="admin-history-panel"'));
 assert.ok(historyPanel.indexOf("Tým 10") < historyPanel.indexOf("Tým 9"));
+assert.match(historyPanel, /Tah 10[\s\S]*?Tým 10/);
+assert.match(historyPanel, /Tah 1[\s\S]*?Tým 1/);
 resultsTab = "teams";
 assert.equal((active.match(/data-participant-accordion="true"/g) ?? []).length, 8);
 assert.doesNotMatch(active, /<details[^>]*data-participant-accordion[^>]* open/);
@@ -163,6 +165,15 @@ assert.doesNotMatch(completed, /Přeskočit účastníka|Vybrat tým za aktuáln
 assert.doesNotMatch(completed, /Tah 33 z 32|Kolo 5/);
 assert.equal((completed.match(/data-test="chat"/g) ?? []).length, 1);
 console.log("✓ Completed 32-pick draft keeps chat without undo or unavailable pick and replacement actions");
+
+resultsTab = "history";
+const completedHistoryMarkup = render(32);
+const completedHistory = completedHistoryMarkup.slice(completedHistoryMarkup.indexOf('id="admin-history-panel"'));
+assert.match(completedHistory, /Tah 32[\s\S]*?Tým 32/);
+assert.match(completedHistory, /Tah 1[\s\S]*?Tým 1/);
+assert.ok(completedHistory.indexOf("Tým 32") < completedHistory.indexOf("Tým 31"));
+resultsTab = "teams";
+console.log("✓ Admin history keeps the newest pick first and numbers a 32-team draft from pick 1 through pick 32");
 
 for (const [boxes, expected] of [
   [[{ productName: "Jeden box", productSeason: "2025/26", boxCount: 1, boxPrice: 999 }], ["Celkem: 1 box", "1× Jeden box", "2025/26"]],

@@ -545,7 +545,7 @@ function DraftDetailPageContent() {
     return null;
   }, [availableItems.length, draft, participantNames]);
   const canStartDraft = Boolean(draft && draft.status === "waiting" && startDraftValidationMessage === null);
-  const canManageTurnAction = Boolean(draft && draft.status === "drafting" && !isSubmittingTurnAction && !isUpdating);
+  const canManageSkipAction = Boolean(draft && draft.status === "drafting" && !isSubmittingTurnAction && !isUpdating);
 
   useEffect(() => {
     if (drawAnimation?.startedAt == null) return;
@@ -1155,40 +1155,6 @@ function DraftDetailPageContent() {
     } finally {
       setIsSubmittingTurnAction(false);
     }
-  }
-
-  async function handleSelectItem(item: DraftItem) {
-    if (!draft || draft.status !== "drafting" || isSubmittingTurnAction) {
-      return;
-    }
-
-    setIsSubmittingTurnAction(true);
-    setError(null);
-
-    try {
-      await callFirestoreWorker("draft.pick", {
-        draftId: draft.id,
-        itemId: item.id,
-        expectedPickIndex: draft.currentPickIndex,
-      });
-    } catch (pickError) {
-      console.error(pickError);
-      if (pickError instanceof Error && pickError.message.includes("změnil")) {
-        setError(INVALID_PICK_MESSAGE);
-      } else {
-        setError("Nepodařilo se uložit výběr.");
-      }
-    } finally {
-      setIsSubmittingTurnAction(false);
-    }
-  }
-
-  async function handleSelectItemForCurrentParticipant() {
-    if (!draft || availableItems.length === 0) {
-      return;
-    }
-
-    await handleSelectItem(availableItems[0]);
   }
 
   function openReplaceDialog(participantIndex: number, participantName: string, currentItemId: string, currentItemName: string, currentPickIndex: number) {
@@ -2043,54 +2009,15 @@ function DraftDetailPageContent() {
           <div className={`grid items-start gap-4 ${isDraftWaiting ? "" : "xl:grid-cols-[1.1fr_0.9fr]"}`}>
             {draft.status !== "waiting" ? (
             <Card className="min-w-0 space-y-3 !p-4 sm:!p-5">
-              <div className="flex flex-wrap gap-2">
-                {draft.status !== "completed" ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void handleSelectItemForCurrentParticipant()}
-                      disabled={!canManageTurnAction}
-                      className="rounded-2xl bg-[#18C964] px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-[#13b15a] disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      Vybrat tým za aktuálního účastníka
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleSkipCurrentParticipant()}
-                      disabled={!canManageTurnAction}
-                      className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
-                    >
-                      Přeskočit účastníka
-                    </button>
-                  </>
-                ) : null}
-              </div>
               {draft.status !== "completed" ? (
-              <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
-                <p className="text-sm text-slate-400">Dostupné týmy</p>
-                {isSubmittingTurnAction ? <p className="mt-2 text-sm text-[#8ef0b5]">Ukládám výběr…</p> : null}
-                <div className="mt-3 grid max-h-80 gap-2 overflow-y-auto overscroll-contain pr-1">
-                  {availableItems.length > 0 ? (
-                    availableItems.map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => void handleSelectItem(item)}
-                        disabled={!canManageTurnAction}
-                        className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left text-sm transition ${canManageTurnAction ? "border-slate-800 bg-slate-900/80 text-slate-200 hover:border-[#18C964]/40 hover:bg-slate-800" : "cursor-not-allowed border-slate-800 bg-slate-900/60 text-slate-500"}`}
-                      >
-                        <span className="flex items-center gap-3">
-                          <TeamLogo item={item} className="h-8 w-8" />
-                          <span>{item.name}</span>
-                        </span>
-                        <span className="text-slate-400">{isSubmittingTurnAction ? "Ukládám výběr…" : canManageTurnAction ? "Vybrat" : "Nedostupné"}</span>
-                      </button>
-                    ))
-                  ) : (
-                    <p className="text-sm text-slate-400">Žádné dostupné položky.</p>
-                  )}
-                </div>
-              </div>
+                <button
+                  type="button"
+                  onClick={() => void handleSkipCurrentParticipant()}
+                  disabled={!canManageSkipAction}
+                  className="rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  Přeskočit účastníka
+                </button>
               ) : null}
             </Card>
             ) : null}
@@ -2216,6 +2143,7 @@ function DraftDetailPageContent() {
                   <div className="max-h-96 space-y-3 overflow-y-auto overscroll-contain px-4 pb-4">
                     {historyEntries.length > 0 ? (
                       historyEntries.map((entry, index) => {
+                        const turnNumber = historyEntries.length - index;
                         const participant = draft.participants[entry.participantIndex];
                         const participantName = participant?.name || `Účastník ${entry.participantIndex + 1}`;
                         const pickedItem = entry.itemId
@@ -2236,7 +2164,7 @@ function DraftDetailPageContent() {
                                   </p>
                                 </div>
                                 <div className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-                                  Tah {index + 1}
+                                  Tah {turnNumber}
                                 </div>
                               </div>
                             </div>
@@ -2262,7 +2190,7 @@ function DraftDetailPageContent() {
                                   </p>
                                 </div>
                                 <div className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-                                  Tah {index + 1}
+                                  Tah {turnNumber}
                                 </div>
                               </div>
                               <div className="mt-3 flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-3">
@@ -2287,7 +2215,7 @@ function DraftDetailPageContent() {
                                 <p className="text-sm text-slate-400">byl přeskočen</p>
                               </div>
                               <div className="rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-                                Tah {index + 1}
+                                Tah {turnNumber}
                               </div>
                             </div>
                           </div>

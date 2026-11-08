@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import React, { isValidElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { getNhlTeamNameLines } from "../src/lib/nhlTeamNames.ts";
 import { defaultDraftItems } from "../src/lib/snakeDraft.ts";
@@ -35,7 +36,15 @@ const worker = load("../src/lib/firestoreWorker.ts", {
   fetch: async (url, init) => {
     requests.push({ url, init });
     if (pendingRequest) await pendingRequest;
-    return Response.json({ status: responseStatus === 200 ? "saved" : "forbidden" }, { status: responseStatus });
+    return Response.json({
+      status: responseStatus === 200
+        ? "saved"
+        : responseStatus === 403
+          ? "forbidden"
+          : responseStatus === 409
+            ? "conflict"
+            : "failed",
+    }, { status: responseStatus });
   },
 });
 const draft = {
@@ -53,7 +62,9 @@ const draft = {
   playerPriorities: { "player-1": ["team-a", "team-b"] },
 };
 const state = [];
+const refs = [];
 let stateIndex;
+let refIndex;
 let effects = [];
 const container = ({ children }) => React.createElement("div", null, children);
 const announcement = () => null;
@@ -73,6 +84,7 @@ const firebase = {
       assert.equal(id, "ROOM1");
       return "public-reference";
     },
+    getDocFromServer: async () => snapshot(snapshotData),
     onSnapshot: (_ref, options, callback) => {
       assert.equal(options.includeMetadataChanges, true);
       snapshotListener = callback;
@@ -95,7 +107,11 @@ const component = load("../src/components/PlayerDraftPage.tsx", {
       return [state[index], (value) => { state[index] = typeof value === "function" ? value(state[index]) : value; }];
     },
     useEffect: (callback) => effects.push(callback),
-    useRef: (initial) => ({ current: initial }),
+    useRef(initial) {
+      const index = refIndex++;
+      refs[index] ??= { current: initial };
+      return refs[index];
+    },
     useMemo: (callback) => callback(),
     useCallback: (callback) => callback,
   },
@@ -124,6 +140,7 @@ const component = load("../src/components/PlayerDraftPage.tsx", {
   "@/lib/instantAutoPick": { startInstantAutoPick: () => () => {} },
   "@/lib/playerSounds": { usePlayerSounds: () => ({ ready: soundsReady, error: null, stop: () => {}, activate: () => { activationCount++; }, toggle: () => { toggleCount++; } }) },
 }, {
+  AbortController,
   console: { info: () => {}, error: (...args) => logs.push(args) },
   window: { localStorage: {
     getItem: (key) => cache.get(key) ?? null,
@@ -136,6 +153,7 @@ const component = load("../src/components/PlayerDraftPage.tsx", {
 
 function render() {
   stateIndex = 0;
+  refIndex = 0;
   effects = [];
   return component.default();
 }
@@ -305,3 +323,55 @@ for (const item of defaultDraftItems) {
   assert.ok(name.props.children.every((line) => line.props.className === "block truncate"));
 }
 console.log("✓ All 32 selection cards share the announcement's explicit two-line NHL names without changing logo sizes");
+
+reset();
+draft.status = "drafting";
+state[8] = "teams";
+state[9] = "teams";
+snapshotData = draft;
+responseStatus = 409;
+render();
+const stopDraftListener = effects[0]();
+await flush();
+const currentTeamPick = find(render(), (node) =>
+  node.type === "button" && node.props.onClick && String(node.props.children).trim() === "Vybrat");
+assert.ok(currentTeamPick);
+currentTeamPick.props.onClick();
+await flush();
+assert.equal(state[2], null, String(logs.at(-1)?.[1]));
+assert.equal(state[3], false);
+assert.equal(requests.at(-1).init.body.includes('"operation":"draft.pick"'), true);
+
+responseStatus = 500;
+const retryTeamPick = find(render(), (node) =>
+  node.type === "button" && node.props.onClick && String(node.props.children).trim() === "Vybrat");
+retryTeamPick.props.onClick();
+await flush();
+assert.equal(state[2], "Nepodařilo se uložit výběr.");
+assert.equal(state[3], false);
+stopDraftListener();
+draft.status = "waiting";
+snapshotData = draft;
+console.log("✓ A lost pick race refreshes state without a red error; a server failure remains visible");
+
+draft.status = "completed";
+draft.currentPickIndex = 32;
+draft.history = Array.from({ length: 32 }, (_, historyIndex) => ({
+  type: "pick",
+  participantIndex: historyIndex % 2,
+  itemId: historyIndex % 2 === 0 ? "team-a" : "team-b",
+}));
+state[0] = draft;
+state[6] = true;
+const playerHistoryMarkup = renderToStaticMarkup(render());
+assert.match(playerHistoryMarkup, /Tah #32<\/span>/);
+assert.match(playerHistoryMarkup, /Tah #1<\/span>/);
+assert.ok(
+  playerHistoryMarkup.indexOf("Tah #32</span>") < playerHistoryMarkup.indexOf("Tah #31</span>") &&
+    playerHistoryMarkup.indexOf("Tah #31</span>") < playerHistoryMarkup.indexOf("Tah #1</span>"),
+);
+state[6] = false;
+draft.status = "waiting";
+draft.currentPickIndex = 0;
+draft.history = [];
+console.log("✓ Player history displays picks 1–32 with the newest pick first");

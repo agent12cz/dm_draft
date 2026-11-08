@@ -1530,6 +1530,12 @@ async function createDraft(
       )) {
         throw new FirestoreSecurityError(409, "Draft history cannot be rewound or overwritten.");
       }
+      if (
+        Array.isArray(updates.history) &&
+        updates.history.slice(currentHistory.length).some((entry) => isRecord(entry) && entry.type === "pick")
+      ) {
+        throw new FirestoreSecurityError(400, "Draft picks must use the authenticated participant pick operation.");
+      }
       if (updates.availableItemIds !== undefined && (
         !Array.isArray(updates.availableItemIds) ||
         updates.availableItemIds.length > (Array.isArray(context.fields.availableItemIds) ? context.fields.availableItemIds.length : 0)
@@ -1588,6 +1594,17 @@ async function createDraft(
           return !participant || !Array.isArray(participant.picks) || participant.picks.length < previous.picks.length;
         })) {
           throw new FirestoreSecurityError(409, "Participant picks cannot be removed by undoing a turn.");
+        }
+        if (currentStatus !== "waiting" && currentParticipants.some((previous) => {
+          if (!isRecord(previous) || !Array.isArray(previous.picks)) return false;
+          const participant = publicParticipants.find((entry) => entry.id === previous.id);
+          return Boolean(
+            participant &&
+            Array.isArray(participant.picks) &&
+            participant.picks.length > previous.picks.length,
+          );
+        })) {
+          throw new FirestoreSecurityError(400, "Draft picks must use the authenticated participant pick operation.");
         }
         if (publicParticipants.length !== Number(context.fields.participantCount ?? publicParticipants.length)) {
           throw new FirestoreSecurityError(400, "Participant count does not match the draft.");
@@ -1783,7 +1800,6 @@ async function createDraft(
     projectId: string,
     accessToken: string,
     actorId: string,
-    isGlobalAdmin: boolean,
     body: Record<string, unknown>,
   ) {
     const draftId = requireString(body.draftId, "draft ID", 128);
@@ -1795,10 +1811,6 @@ async function createDraft(
       const pickOrder = numberArray(context.fields.pickOrder);
       const currentPickIndex = Number(context.fields.currentPickIndex ?? 0);
       const participantIndex = pickOrder[currentPickIndex];
-      const actorRole = ownerOrAdmin(context, actorId, isGlobalAdmin);
-      if (!actorRole && participantIndexForUser(context, actorId) !== participantIndex) {
-        throw new FirestoreSecurityError(403, "Only the assigned participant may make this pick.");
-      }
       if (
         context.fields.status !== "drafting" ||
         (body.expectedPickIndex !== undefined && body.expectedPickIndex !== currentPickIndex) ||
@@ -1807,6 +1819,9 @@ async function createDraft(
         participantIndex >= participants.length
       ) {
         throw new FirestoreSecurityError(409, "The current draft turn has changed.");
+      }
+      if (participantIndexForUser(context, actorId) !== participantIndex) {
+        throw new FirestoreSecurityError(403, "Only the participant whose turn it is may make this pick.");
       }
 
       const availableItemIds = stringArray(context.fields.availableItemIds);
@@ -2349,7 +2364,7 @@ async function createDraft(
       case "draft.start":
         return startDraftSecurely(request, projectId, accessToken, actor.uid, globalAdmin, body);
       case "draft.pick":
-        return pickDraftItem(request, projectId, accessToken, actor.uid, globalAdmin, body);
+        return pickDraftItem(request, projectId, accessToken, actor.uid, body);
       case "draft.skip":
         return skipDraftTurn(request, projectId, accessToken, actor.uid, globalAdmin, body);
       case "draft.priorities":

@@ -7,7 +7,7 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
-import { callFirestoreWorker, getDraftPrivateAccess } from "@/lib/firestoreWorker";
+import { callFirestoreWorker, FirestoreWorkerError, getDraftPrivateAccess } from "@/lib/firestoreWorker";
 import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import { getTimeLeftForTurn, getTurnKey, type TurnCountdown } from "@/lib/turnCountdown";
@@ -146,8 +146,6 @@ function TeamLogo({
     />
   );
 }
-
-const INVALID_PICK_MESSAGE = "Výběr už není platný. Stav draftu byl aktualizován.";
 
 function resolveHistoryItem(draftItems: DraftItem[], itemId?: string, itemName?: string) {
   if (itemId) {
@@ -869,8 +867,16 @@ export default function PlayerDraftPage() {
       });
     } catch (pickError) {
       console.error(pickError);
-      if (pickError instanceof Error && pickError.message.includes("změnil")) {
-        setError(INVALID_PICK_MESSAGE);
+      if (pickError instanceof FirestoreWorkerError && pickError.status === 409) {
+        try {
+          const refreshDraft = refreshDraftRef.current;
+          if (!refreshDraft) throw new Error("Draft listener is not ready.");
+          await refreshDraft(new AbortController().signal);
+          setError(null);
+        } catch (refreshError) {
+          console.error("Could not refresh the draft after a concurrent pick.", refreshError);
+          setError("Nepodařilo se aktualizovat stav draftu po souběžném výběru.");
+        }
       } else {
         setError("Nepodařilo se uložit výběr.");
       }

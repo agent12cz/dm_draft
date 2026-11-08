@@ -524,6 +524,58 @@ function expireAutoPick(draftId) {
   });
 }
 
+const adminPickFixtureTimer = {
+  turnDurationSeconds: 15,
+  turnStartedAt: { __firestoreTimestamp: true, value: new Date().toISOString() },
+};
+seedAutoPick("ADMIN-NOT-PLAYER", adminPickFixtureTimer);
+await assert.rejects(
+  operation("global-admin", "draft.pick", {
+    draftId: "ADMIN-NOT-PLAYER",
+    itemId: "team-a",
+    expectedPickIndex: 0,
+  }),
+  (error) => error.status === 403,
+);
+assert.equal(firestore.read("publicDrafts/ADMIN-NOT-PLAYER").history.length, 0);
+
+seedAutoPick("ADMIN-AS-PLAYER", adminPickFixtureTimer, {
+  participants: [{ userId: "global-admin" }, { userId: "player-2" }],
+});
+const adminPlayerPick = await operation("global-admin", "draft.pick", {
+  draftId: "ADMIN-AS-PLAYER",
+  itemId: "team-a",
+  expectedPickIndex: 0,
+});
+assert.equal(adminPlayerPick.status, "picked");
+assert.equal(firestore.read("publicDrafts/ADMIN-AS-PLAYER").history.length, 1);
+
+seedAutoPick("ADMIN-UPDATE-PICK", adminPickFixtureTimer);
+const updatePickBefore = firestore.read("publicDrafts/ADMIN-UPDATE-PICK");
+await assert.rejects(
+  operation("global-admin", "draft.update", {
+    draftId: "ADMIN-UPDATE-PICK",
+    updates: {
+      history: [{ type: "pick", participantIndex: 0, itemId: "team-a" }],
+    },
+  }),
+  (error) => error.status === 400,
+);
+await assert.rejects(
+  operation("global-admin", "draft.update", {
+    draftId: "ADMIN-UPDATE-PICK",
+    updates: {
+      participants: updatePickBefore.participants.map((participant, index) =>
+        index === 0 ? { ...participant, picks: ["team-a"] } : participant,
+      ),
+      availableItemIds: updatePickBefore.availableItemIds.filter((itemId) => itemId !== "team-a"),
+    },
+  }),
+  (error) => error.status === 400,
+);
+assert.deepEqual(firestore.read("publicDrafts/ADMIN-UPDATE-PICK"), updatePickBefore);
+console.log("✓ Admin picks are rejected through draft.pick and draft.update, while assigned admins keep their own turn");
+
 for (const status of ["drafting", "paused", "completed"]) {
   const draftId = `NO-UNDO-${status}`;
   const originalPick = { type: "pick", participantIndex: 0, itemId: "team-a" };
@@ -698,6 +750,36 @@ assert.equal(firestore.read("publicDrafts/CONCURRENT-PICKS").history.length, 1);
 assert.equal(firestore.read("publicDrafts/CONCURRENT-PICKS").history[0].itemId, "team-c");
 assertPublicPickPrivacy("CONCURRENT-PICKS", concurrentBefore);
 console.log("✓ Cron and browser racing the same expired turn commit exactly one player-priority pick");
+
+seedAutoPick("PLAYER-AUTOPICK-RACE");
+await operation("player-1", "draft.priorities", {
+  draftId: "PLAYER-AUTOPICK-RACE",
+  priorities: ["team-b", "team-a"],
+});
+const manualAutoRace = await Promise.allSettled([
+  operation("player-1", "draft.pick", {
+    draftId: "PLAYER-AUTOPICK-RACE",
+    itemId: "team-a",
+    expectedPickIndex: 0,
+  }),
+  runImmediateDraftPick(
+    env,
+    { draftId: "PLAYER-AUTOPICK-RACE", userId: "owner", expectedPickIndex: 0 },
+    firestore.fetchMock,
+  ),
+]);
+const racedPlayerDraft = firestore.read("publicDrafts/PLAYER-AUTOPICK-RACE");
+assert.equal(racedPlayerDraft.history.length, 1);
+assert.equal(racedPlayerDraft.currentPickIndex, 1);
+assert.equal(new Set(racedPlayerDraft.history.map((entry) => entry.itemId)).size, 1);
+if (manualAutoRace[0].status === "rejected") {
+  assert.equal(manualAutoRace[0].reason.status, 409);
+}
+assert.ok(
+  manualAutoRace[1].status === "fulfilled" &&
+    ["picked", "not-expired", "changed"].includes(manualAutoRace[1].value.status),
+);
+console.log("✓ A player pick racing autopick commits only one team and never advances the turn twice");
 
 seedAutoPick("UNASSIGNED-PICK", {}, { participants: [{}, { userId: "player-2" }] });
 const forbiddenPick = await runImmediateDraftPick(
