@@ -90,6 +90,8 @@ let timers = [];
 let searchResponse;
 let searchFailure;
 const calls = [];
+const invitationToken = "A".repeat(43);
+let copiedInvitationLink;
 const container = ({ children }) => React.createElement("div", null, children);
 const callWorker = async (operation, payload) => {
   calls.push({ operation, payload });
@@ -97,6 +99,7 @@ const callWorker = async (operation, payload) => {
     if (searchFailure) throw searchFailure;
     return searchResponse ?? { users: [{ uid: "dan", displayName: "Dan" }] };
   }
+  if (operation === "invite.create") return { status: "created", token: invitationToken };
   return {};
 };
 const participantHelper = load("../src/lib/participantUpdate.ts", {
@@ -131,9 +134,11 @@ const page = load("../src/app/draft/[code]/page.tsx", {
 }, {
   console: { error: (...args) => logs.push(args) },
   window: {
+    location: { origin: "https://draft.example.test" },
     setTimeout: (callback, delay) => { const timer = { callback, delay }; timers.push(timer); return timer; },
     clearTimeout: (timer) => { timers = timers.filter((entry) => entry !== timer); },
   },
+  navigator: { clipboard: { writeText: async (value) => { copiedInvitationLink = value; } } },
 }, "\nexport { DraftDetailPageContent as TestContent };");
 
 function render() {
@@ -203,6 +208,29 @@ const nextCleanup = await executeSearch();
 resolveOld({ users: [{ uid: "old", displayName: "Old" }] });
 await oldSearch;
 assert.equal(state[14][0].uid, "new");
-assert.equal(state[16], false);
+assert.equal(state[21], false);
 nextCleanup();
 console.log("✓ Late responses cannot overwrite a newer search");
+
+state[0] = {
+  ...fixture,
+  participants: [{ ...fixture.participants[0], name: "Guest", status: "pending-registration" }],
+};
+state[17] = ["slot"];
+const createInvitation = find(render(), (node) =>
+  node.type === "button" && node.props.children === "Vytvořit pozvánku (1)",
+);
+assert.ok(createInvitation);
+createInvitation.props.onClick();
+for (let index = 0; index < 30; index++) await Promise.resolve();
+assert.equal(state[18], `https://draft.example.test/invite#${invitationToken}`);
+assert.equal(copiedInvitationLink, state[18]);
+const invitationUrl = new URL(copiedInvitationLink);
+assert.equal(invitationUrl.pathname, "/invite");
+assert.equal(invitationUrl.search, "");
+assert.equal(invitationUrl.hash, `#${invitationToken}`);
+assert.deepEqual(JSON.parse(JSON.stringify(calls.find((call) => call.operation === "invite.create"))), {
+  operation: "invite.create",
+  payload: { draftId: "HM85L", participantIds: ["slot"] },
+});
+console.log("✓ Generated and copied invitations keep the token only in the URL fragment");

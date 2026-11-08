@@ -26,7 +26,8 @@ type DraftParticipant = {
   email?: string;
   joinedAt?: unknown;
   pickCount?: number;
-  status?: "waiting" | "ready";
+  status?: "waiting" | "ready" | "pending-registration";
+  invitationStatus?: "active" | "consumed" | "revoked";
   picks: string[];
   participantPin?: string;
   participantId?: string;
@@ -198,6 +199,11 @@ function DraftDetailPageContent() {
   const [userSearch, setUserSearch] = useState("");
   const [matchingUsers, setMatchingUsers] = useState<Array<{ uid: string; displayName: string; email?: string }>>([]);
   const [selectedParticipantIndex, setSelectedParticipantIndex] = useState<number | null>(null);
+  const [pendingPlayerName, setPendingPlayerName] = useState("");
+  const [selectedInviteParticipantIds, setSelectedInviteParticipantIds] = useState<string[]>([]);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [inviteFeedback, setInviteFeedback] = useState<string | null>(null);
+  const [isManagingInvite, setIsManagingInvite] = useState(false);
   const [isSearchingUsers, setIsSearchingUsers] = useState(false);
   const [joinModalOpen, setJoinModalOpen] = useState(false);
   const [joinDraftCode, setJoinDraftCode] = useState("");
@@ -250,7 +256,11 @@ function DraftDetailPageContent() {
       email: participant.email ?? "",
       joinedAt: participant.joinedAt ?? null,
       pickCount: Number(participant.pickCount ?? participant.picks?.length ?? 0),
-      status: participant.status === "ready" ? "ready" : "waiting",
+      status: participant.status === "ready"
+        ? "ready"
+        : participant.status === "pending-registration"
+          ? "pending-registration"
+          : "waiting",
       picks: participant.picks ?? [],
     };
   }
@@ -262,7 +272,11 @@ function DraftDetailPageContent() {
     const resolvedEmail = typeof participant.email === "string" ? participant.email : "";
     const resolvedUserId = typeof participant.userId === "string" ? participant.userId : "";
     const resolvedUid = typeof participant.uid === "string" ? participant.uid : resolvedUserId;
-    const resolvedStatus = participant.status === "ready" ? "ready" : "waiting";
+    const resolvedStatus = participant.status === "ready"
+      ? "ready"
+      : participant.status === "pending-registration"
+        ? "pending-registration"
+        : "waiting";
     const resolvedPicks = Array.isArray(participant.picks) ? participant.picks : [];
 
     const nextParticipant = {
@@ -519,15 +533,10 @@ function DraftDetailPageContent() {
       return "Vyplňte jména všech účastníků.";
     }
 
-    if (draft.participants.some((participant) => !getResolvedParticipantUserId(participant))) {
-      return "Přiřaďte ke každé pozici konkrétního registrovaného uživatele.";
-    }
-
-    const assignedUserIds = draft.participants
-      .map((participant) => getResolvedParticipantUserId(participant))
-      .filter((userId) => userId.length > 0);
-    if (new Set(assignedUserIds).size !== assignedUserIds.length) {
-      return "Každý uživatel může být v draftu přiřazen pouze jednou.";
+    if (draft.participants.some((participant) =>
+      !getResolvedParticipantUserId(participant) && participant.status !== "pending-registration",
+    )) {
+      return "Přiřaďte registrované hráče nebo připravte pozici pro neregistrovaného hráče.";
     }
 
     if (draft.participantCount !== draft.participants.length) {
@@ -987,6 +996,117 @@ function DraftDetailPageContent() {
     }
   }
 
+  async function handleReservePendingParticipant(participantIndex: number) {
+    if (!draft) return;
+    const name = pendingPlayerName.trim();
+    if (!name) {
+      setUserSearchError("Zadejte jméno nebo přezdívku hráče.");
+      return;
+    }
+
+    const nextParticipants = draft.participants.map((participant, index) =>
+      index === participantIndex
+        ? sanitizeParticipantForWrite(
+            {
+              ...participant,
+              name,
+              displayName: name,
+              userId: "",
+              uid: "",
+              email: "",
+              status: "pending-registration",
+              joinedAt: null,
+            },
+            index,
+          )
+        : sanitizeParticipantForWrite(participant, index),
+    );
+
+    try {
+      const { db, firestoreApi } = await getFirebaseClient();
+      await commitParticipantUpdate(db, firestoreApi, draft.id, draft, {
+        participants: nextParticipants,
+      }, normalizeParticipant, { waiting: true });
+      setParticipantNames(nextParticipants.map((participant) => participant.name));
+      setPendingPlayerName("");
+      setUserSearchError(null);
+      setSelectedParticipantIndex(null);
+    } catch (reserveError) {
+      console.error(reserveError);
+      setUserSearchError(participantUpdateMessage(reserveError, "Nepodařilo se připravit pozici."));
+    }
+  }
+
+  function toggleInviteParticipant(participantId: string) {
+    setSelectedInviteParticipantIds((selected) => selected.includes(participantId)
+      ? selected.filter((id) => id !== participantId)
+      : [...selected, participantId],
+    );
+  }
+
+  async function handleCreateInvitation() {
+    if (!draft || selectedInviteParticipantIds.length === 0) return;
+    setIsManagingInvite(true);
+    setInviteFeedback(null);
+    setInviteLink(null);
+    try {
+      const result = await callFirestoreWorker<{ status: string; token?: string }>(
+        "invite.create",
+        { draftId: draft.id, participantIds: selectedInviteParticipantIds },
+      );
+      if (result.status !== "created" || !result.token) {
+        throw new Error("Server nevrátil novou pozvánku.");
+      }
+      const link = `${window.location.origin}/invite#${result.token}`;
+      setInviteLink(link);
+      setSelectedInviteParticipantIds([]);
+      try {
+        await navigator.clipboard.writeText(link);
+        setInviteFeedback("Osobní pozvánka byla vytvořena a zkopírována.");
+      } catch {
+        setInviteFeedback("Pozvánka byla vytvořena. Zkopírujte zobrazený odkaz.");
+      }
+    } catch (inviteError) {
+      console.error(inviteError);
+      setInviteFeedback(inviteError instanceof Error ? inviteError.message : "Pozvánku se nepodařilo vytvořit.");
+    } finally {
+      setIsManagingInvite(false);
+    }
+  }
+
+  async function handleCopyInvitation() {
+    if (!inviteLink) return;
+    try {
+      await navigator.clipboard.writeText(inviteLink);
+      setInviteFeedback("Odkaz pozvánky byl zkopírován.");
+    } catch {
+      setInviteFeedback("Odkaz se nepodařilo zkopírovat. Označte jej a zkopírujte ručně.");
+    }
+  }
+
+  async function handleRevokeInvitation(participantId: string) {
+    if (!draft) return;
+    setIsManagingInvite(true);
+    setInviteFeedback(null);
+    try {
+      const result = await callFirestoreWorker<{ status: string }>(
+        "invite.revoke",
+        { draftId: draft.id, participantId },
+      );
+      setInviteFeedback(result.status === "used"
+        ? "Tuto pozvánku již hráč převzal."
+        : result.status === "revoked"
+          ? "Pozvánka byla zneplatněna."
+          : "Aktivní pozvánka nebyla nalezena.",
+      );
+    } catch (revokeError) {
+      console.error(revokeError);
+      setInviteFeedback(revokeError instanceof Error ? revokeError.message : "Pozvánku se nepodařilo zneplatnit.");
+    } finally {
+      setIsManagingInvite(false);
+    }
+  }
+
   async function handleJoinDraftFromCode() {
     if (!user) {
       setJoinMessage("Nejprve se přihlaste.");
@@ -1063,16 +1183,10 @@ function DraftDetailPageContent() {
       return;
     }
 
-    if (nextParticipants.some((participant) => !getResolvedParticipantUserId(participant))) {
-      setStartDraftMessage("Přiřaďte ke každé pozici konkrétního registrovaného uživatele.");
-      return;
-    }
-
-    const nextUserIds = nextParticipants
-      .map((participant) => getResolvedParticipantUserId(participant))
-      .filter((participantUserId) => participantUserId.length > 0);
-    if (new Set(nextUserIds).size !== nextUserIds.length) {
-      setStartDraftMessage("Každý uživatel může být v draftu přiřazen pouze jednou.");
+    if (nextParticipants.some((participant) =>
+      !getResolvedParticipantUserId(participant) && participant.status !== "pending-registration",
+    )) {
+      setStartDraftMessage("Přiřaďte registrované hráče nebo připravte pozici pro neregistrovaného hráče.");
       return;
     }
 
@@ -1637,6 +1751,49 @@ function DraftDetailPageContent() {
               </p>
             </div>
 
+            {draft.participants.some((participant) => participant.status === "pending-registration") ? (
+              <div className="space-y-3 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-amber-200">Osobní pozvánky</p>
+                    <p className="mt-1 text-sm text-slate-400">
+                      Vyberte jednu nebo více pozic stejného hráče. Odkaz lze použít jen jednou.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleCreateInvitation()}
+                    disabled={isManagingInvite || selectedInviteParticipantIds.length === 0 || draft.status === "completed"}
+                    className="rounded-xl bg-amber-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isManagingInvite ? "Zpracovávám..." : `Vytvořit pozvánku (${selectedInviteParticipantIds.length})`}
+                  </button>
+                </div>
+                {inviteLink ? (
+                  <div className="flex flex-wrap gap-2">
+                    <input
+                      aria-label="Osobní odkaz pozvánky"
+                      readOnly
+                      value={inviteLink}
+                      className="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyInvitation()}
+                      className="rounded-xl border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800"
+                    >
+                      Kopírovat odkaz
+                    </button>
+                  </div>
+                ) : null}
+                {inviteFeedback ? (
+                  <p role="status" className={`text-sm ${inviteFeedback.toLowerCase().includes("nepodařilo") ? "text-red-300" : "text-amber-100"}`}>
+                    {inviteFeedback}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
             {drawAnimation ? (
               <div aria-live="polite" className="text-sm font-semibold text-[#8ef0b5]">
                 {drawAnimation.startedAt === null ? "Ukládám vylosované pořadí…" : "Losování pořadí probíhá…"}
@@ -1650,15 +1807,19 @@ function DraftDetailPageContent() {
                 ? drawAnimation.participants.map((_, index, participants) => participants[(index + drawAnimation.offset) % participants.length])
                 : draft.participants).map((participant, index) => {
                 const isCurrentTurn = currentParticipant?.id === participant.id;
-                const participantStatusLabel = participant.status === "ready"
-                  ? "Připojen"
+                const participantStatusLabel = participant.status === "pending-registration"
+                  ? "Čeká na registraci"
+                  : participant.status === "ready"
+                    ? "Připojen"
                   : isCurrentTurn && !isDraftWaiting
                     ? "Na tahu"
                     : isDraftWaiting
                       ? "Čeká na připojení"
                       : "Rezervováno";
-                const participantStatusClass = participant.status === "ready"
-                  ? "border-[#18C964]/20 bg-[#18C964]/10 text-[#8ef0b5]"
+                const participantStatusClass = participant.status === "pending-registration"
+                  ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                  : participant.status === "ready"
+                    ? "border-[#18C964]/20 bg-[#18C964]/10 text-[#8ef0b5]"
                   : isCurrentTurn && !isDraftWaiting
                     ? "border-orange-500/20 bg-orange-500/10 text-orange-300"
                     : "border-slate-700 bg-slate-900/70 text-slate-300";
@@ -1666,6 +1827,16 @@ function DraftDetailPageContent() {
                 return (
                 <div key={participant.id} className={`rounded-xl border p-3 ${isCurrentTurn ? "border-[#18C964]/40 bg-[#18C964]/5" : "border-slate-800 bg-slate-950/70"}`}>
                   <div className="flex items-start gap-2">
+                    {participant.status === "pending-registration" && !getResolvedParticipantUserId(participant) ? (
+                      <input
+                        type="checkbox"
+                        aria-label={`Vybrat pozici ${index + 1} pro osobní pozvánku`}
+                        checked={selectedInviteParticipantIds.includes(participant.id)}
+                        onChange={() => toggleInviteParticipant(participant.id)}
+                        disabled={draft.status === "completed" || isManagingInvite}
+                        className="mt-2 h-4 w-4 accent-amber-300"
+                      />
+                    ) : null}
                     <details className="group min-w-0 flex-1" data-participant-accordion>
                       <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 [&::-webkit-details-marker]:hidden">
                         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-800 text-xs font-bold text-slate-300">{index + 1}</span>
@@ -1687,8 +1858,21 @@ function DraftDetailPageContent() {
                   <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-800 bg-slate-900/70 px-3 py-3">
                     <div className="min-w-0 flex-1">
                       <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Přiřazený uživatel</p>
-                      <p className="mt-1 text-sm text-slate-200">{participant.userId || participant.uid ? participant.name || "Přiřazený uživatel" : "—"}</p>
+                      <p className="mt-1 text-sm text-slate-200">
+                        {participant.userId || participant.uid
+                          ? participant.name || "Přiřazený uživatel"
+                          : participant.status === "pending-registration"
+                            ? "Čeká na registraci"
+                            : "—"}
+                      </p>
                       {participant.email ? <p className="text-xs text-slate-500">{participant.email}</p> : null}
+                      {participant.invitationStatus === "active" ? (
+                        <p className="mt-1 text-xs text-amber-200">Osobní pozvánka aktivní</p>
+                      ) : participant.invitationStatus === "consumed" ? (
+                        <p className="mt-1 text-xs text-[#8ef0b5]">Pozvánka byla převzata</p>
+                      ) : participant.invitationStatus === "revoked" ? (
+                        <p className="mt-1 text-xs text-slate-400">Pozvánka zneplatněna</p>
+                      ) : null}
                     </div>
                     <button
                       type="button"
@@ -1712,9 +1896,42 @@ function DraftDetailPageContent() {
                         Odebrat uživatele
                       </button>
                     ) : null}
+                    {participant.invitationStatus === "active" ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleRevokeInvitation(participant.id)}
+                        disabled={isManagingInvite}
+                        className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Zneplatnit pozvánku
+                      </button>
+                    ) : null}
                   </div>
                   {selectedParticipantIndex === index ? (
                     <div className="mt-3 rounded-2xl border border-slate-800 bg-slate-900/80 p-3">
+                      <div className="mb-4 space-y-2 border-b border-slate-800 pb-4">
+                        <label className="grid gap-2 text-sm font-medium text-slate-300">
+                          Neregistrovaný hráč
+                          <input
+                            value={pendingPlayerName}
+                            onChange={(event) => {
+                              setPendingPlayerName(event.target.value);
+                              setUserSearchError(null);
+                            }}
+                            maxLength={100}
+                            placeholder="Jméno nebo přezdívka"
+                            className="rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-amber-400/50"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => void handleReservePendingParticipant(index)}
+                          disabled={isSettingsLocked}
+                          className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Připravit pozici
+                        </button>
+                      </div>
                       <label className="grid gap-2 text-sm font-medium text-slate-300">
                         Najít registrovaného uživatele
                         <input
@@ -2275,7 +2492,7 @@ function DraftDetailPageContent() {
           <div className="w-full max-w-xl rounded-3xl border border-slate-800 bg-slate-900/95 p-6 shadow-2xl shadow-slate-950/70">
             <p className="text-sm font-medium uppercase tracking-[0.25em] text-slate-500">Připojit se k draftu</p>
             <h3 className="mt-3 text-xl font-semibold text-white">Zadejte kód draftu</h3>
-            <p className="mt-2 text-sm text-slate-400">Pokud je vaše jméno mezi rezervovanými účastníky, obsadí se vaše místo.</p>
+            <p className="mt-2 text-sm text-slate-400">Po zadání kódu se obsadí první volná pozice. Rezervované pozice se přebírají pouze osobní pozvánkou.</p>
             <label className="mt-5 grid gap-2 text-sm font-medium text-slate-300">
               Kód draftu
               <input

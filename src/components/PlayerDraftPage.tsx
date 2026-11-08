@@ -28,6 +28,7 @@ type DraftParticipant = {
   participantPin?: string;
   participantId?: string;
   priorities?: string[];
+  status?: "waiting" | "ready" | "pending-registration";
 };
 
 type DraftHistoryItem = {
@@ -2103,6 +2104,11 @@ export default function PlayerDraftPage() {
                                 <p className="truncate text-sm font-bold text-white">
                                   {participant.name || `Účastník ${index + 1}`}
                                 </p>
+                                {participant.status === "pending-registration" ? (
+                                  <span className="rounded-md bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-bold text-amber-200">
+                                    Čeká na registraci
+                                  </span>
+                                ) : null}
                                 {isMe ? (
                                   <span className="rounded-md bg-[#18C964]/20 px-1.5 py-0.5 text-[10px] font-black uppercase text-[#8ef0b5]">
                                     Vy

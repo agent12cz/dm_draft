@@ -793,6 +793,8 @@ type DraftPrivateParticipant = {
   participantId?: string;
   participantPin?: string | null;
   joinedAt?: unknown;
+  inviteHash?: string;
+  invitationStatus?: "active" | "consumed" | "revoked";
 };
 
 type DraftPrivateFields = {
@@ -804,6 +806,8 @@ type DraftPrivateFields = {
 type DraftTransactionContext = {
   accessToken: string;
   baseUrl: string;
+  transaction: string;
+  draftId: string;
   documentName: string;
   privateDocumentName: string;
   fields: Record<string, unknown>;
@@ -829,6 +833,8 @@ const PRIVATE_PARTICIPANT_FIELDS = [
   "participantId",
   "participantPin",
   "joinedAt",
+  "inviteHash",
+  "invitationStatus",
 ] as const;
 const DRAFT_PUBLIC_UPDATE_FIELDS = new Set([
   "title",
@@ -962,15 +968,19 @@ function visibleDraftParticipants(
     const publicValue = isRecord(participant) ? participant : {};
     const privateValue = privateParticipants[index] ?? {};
     if (role === "owner" || role === "admin" || privateValue.userId === userId) {
+      const visiblePrivateValue = Object.fromEntries(
+        Object.entries(privateValue).filter(([key]) => key !== "inviteHash"),
+      );
       return plainValue({
         ...publicValue,
-        ...privateValue,
+        ...visiblePrivateValue,
         userId: privateValue.userId ?? "",
         uid: privateValue.userId ?? "",
         email: privateValue.email ?? "",
         participantId: privateValue.participantId ?? "",
         participantPin: privateValue.participantPin ?? null,
         joinedAt: privateValue.joinedAt ?? null,
+        invitationStatus: privateValue.invitationStatus,
       });
     }
     return plainValue(stripPrivateParticipantFields(publicValue));
@@ -1056,6 +1066,8 @@ async function getDraftTransactionContext(
   return {
     accessToken,
     baseUrl: firestoreDocumentsUrl(projectId),
+    transaction,
+    draftId,
     documentName,
     privateDocumentName,
     fields,
@@ -1153,9 +1165,19 @@ function participantParts(
 
   const publicParticipants: Record<string, unknown>[] = [];
   const privateParticipants: DraftPrivateParticipant[] = [];
+  const previousById = new Map(
+    previous
+      .filter((participant) => typeof participant.participantId === "string")
+      .map((participant) => [participant.participantId as string, participant]),
+  );
   for (let index = 0; index < incoming.length; index += 1) {
     const participant = requireRecord(incoming[index], "Invalid participant.");
-    const oldPrivate = previous[index] ?? {};
+    const participantId = typeof participant.participantId === "string"
+      ? participant.participantId
+      : typeof participant.id === "string"
+        ? participant.id
+        : "";
+    const oldPrivate = previousById.get(participantId) ?? previous[index] ?? {};
     const userIdValue = participant.userId === ""
       ? participant.uid ?? ""
       : participant.userId ?? participant.uid ?? oldPrivate.userId ?? "";
@@ -1169,11 +1191,13 @@ function participantParts(
       email: typeof participant.email === "string" ? participant.email : oldPrivate.email ?? "",
       participantId: typeof participant.participantId === "string"
         ? participant.participantId
-        : oldPrivate.participantId ?? "",
+        : oldPrivate.participantId ?? (typeof participant.id === "string" ? participant.id : ""),
       participantPin: typeof participant.participantPin === "string"
         ? participant.participantPin
         : oldPrivate.participantPin ?? null,
       joinedAt: participant.joinedAt ?? oldPrivate.joinedAt ?? null,
+      ...(oldPrivate.inviteHash ? { inviteHash: oldPrivate.inviteHash } : {}),
+      ...(oldPrivate.invitationStatus ? { invitationStatus: oldPrivate.invitationStatus } : {}),
     };
     publicParticipants.push(stripPrivateParticipantFields(participant));
     privateParticipants.push(privateParticipant);
@@ -1214,7 +1238,7 @@ async function resolveParticipantEmails(
 }
 
 function ownerOrAdmin(
-  context: DraftTransactionContext,
+  context: Pick<DraftTransactionContext, "privateFields">,
   actorId: string,
   isGlobalAdmin: boolean,
 ) {
@@ -1224,7 +1248,7 @@ function ownerOrAdmin(
   return null;
 }
 
-function participantIndexForUser(context: DraftTransactionContext, actorId: string) {
+function participantIndexForUser(context: Pick<DraftTransactionContext, "privateFields">, actorId: string) {
   const privateParticipants = context.privateFields.participants ?? [];
   return privateParticipants.findIndex((participant) => participant.userId === actorId);
 }
@@ -1429,6 +1453,404 @@ async function createDraft(
     };
   }
 
+  const INVITE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+  async function hashInviteToken(value: unknown) {
+    const token = requireString(value, "invitation token", 128);
+    if (!INVITE_TOKEN_PATTERN.test(token)) {
+      throw new FirestoreSecurityError(400, "Invalid invitation token.");
+    }
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+    return base64UrlEncode(new Uint8Array(digest));
+  }
+
+  function invitationParticipantIds(value: unknown) {
+    if (
+      !Array.isArray(value) ||
+      value.length === 0 ||
+      value.length > 100 ||
+      value.some((participantId) =>
+        typeof participantId !== "string" || participantId.length === 0 || participantId.length > 128,
+      )
+    ) {
+      return null;
+    }
+    const participantIds = value as string[];
+    return new Set(participantIds).size === participantIds.length ? participantIds : null;
+  }
+
+  function getInvitationParticipantIndexes(
+    invitation: Record<string, unknown>,
+    draftId: string,
+    participants: unknown[],
+  ) {
+    if (invitation.draftId !== draftId) return null;
+    const participantIds = invitationParticipantIds(invitation.participantIds);
+    if (!participantIds) return null;
+    const indexes = participantIds.map((participantId) =>
+      participants.findIndex((participant) => isRecord(participant) && participant.id === participantId),
+    );
+    return indexes.every((index) => index >= 0) ? indexes : null;
+  }
+
+  async function previewDraftInvitation(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    body: Record<string, unknown>,
+  ) {
+    const inviteHash = await hashInviteToken(body.token);
+    const document = await getFirestoreDocument(
+      request,
+      accessToken,
+      documentResource(projectId, "draftInvites", inviteHash),
+    );
+    const invitation = document?.fields ? decodeFirestoreFields(document.fields) : null;
+    if (!invitation) return { status: "invalid" };
+    if (invitation.status === "consumed") return { status: "used" };
+    if (
+      invitation.status !== "active" ||
+      typeof invitation.draftId !== "string" ||
+      !DRAFT_ID_PATTERN.test(invitation.draftId)
+    ) {
+      return { status: "invalid" };
+    }
+
+    let loaded: Awaited<ReturnType<typeof loadDraftForAccess>>;
+    try {
+      loaded = await loadDraftForAccess(request, projectId, accessToken, invitation.draftId);
+    } catch (error) {
+      if (error instanceof FirestoreSecurityError && error.status === 404) {
+        return { status: "invalid" };
+      }
+      throw error;
+    }
+    const participants = Array.isArray(loaded.fields.participants) ? loaded.fields.participants : [];
+    if (loaded.fields.status === "completed") return { status: "invalid" };
+    const indexes = getInvitationParticipantIndexes(invitation, invitation.draftId, participants);
+    if (!indexes) return { status: "invalid" };
+    const publicParticipants = participants.filter(isRecord);
+    if (indexes.some((index) => {
+      const participant = publicParticipants[index];
+      const privateParticipant = loaded.privateFields.participants?.[index];
+      return (
+        privateParticipant?.inviteHash !== inviteHash ||
+        privateParticipant?.userId ||
+        participant.status !== "pending-registration"
+      );
+    })) {
+      return { status: "invalid" };
+    }
+
+    return {
+      status: "active",
+      draftId: invitation.draftId,
+      draftTitle: typeof loaded.fields.title === "string" ? loaded.fields.title : "Draft",
+      participants: indexes.map((index) => {
+        const participant = publicParticipants[index];
+        return {
+          id: String(participant.id),
+          name: String(participant.displayName ?? participant.name ?? "Účastník"),
+        };
+      }),
+    };
+  }
+
+  async function createDraftInvitation(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    if (!DRAFT_ID_PATTERN.test(draftId)) throw new FirestoreSecurityError(400, "Invalid draft ID.");
+    const participantIds = invitationParticipantIds(body.participantIds);
+    if (!participantIds) throw new FirestoreSecurityError(400, "Select one or more valid participant positions.");
+
+    const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = base64UrlEncode(tokenBytes);
+    const inviteHash = await hashInviteToken(token);
+    const inviteDocumentName = documentResource(projectId, "draftInvites", inviteHash);
+
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (!ownerOrAdmin(context, actorId, isGlobalAdmin)) {
+        throw new FirestoreSecurityError(403, "Only the owner or a global administrator may create invitations.");
+      }
+      if (context.fields.status === "completed") {
+        throw new FirestoreSecurityError(409, "This draft is already completed.");
+      }
+
+      const participants = Array.isArray(context.fields.participants)
+        ? context.fields.participants.filter(isRecord)
+        : [];
+      const indexes = participantIds.map((participantId) =>
+        participants.findIndex((participant) => participant.id === participantId),
+      );
+      if (indexes.some((index) => index < 0)) {
+        throw new FirestoreSecurityError(409, "A selected participant position no longer exists.");
+      }
+      const privateParticipants = context.privateFields.participants ?? [];
+      if (indexes.some((index) =>
+        participants[index].status !== "pending-registration" ||
+        Boolean(privateParticipants[index]?.userId),
+      )) {
+        throw new FirestoreSecurityError(409, "Only unclaimed registration positions can be invited.");
+      }
+
+      const oldHashes = new Set(
+        indexes
+          .map((index) => privateParticipants[index]?.inviteHash)
+          .filter((hash): hash is string => typeof hash === "string" && hash.length > 0),
+      );
+      const oldInvitations = await Promise.all([...oldHashes].map(async (hash) => ({
+        hash,
+        document: await getFirestoreDocument(
+          request,
+          accessToken,
+          documentResource(projectId, "draftInvites", hash),
+          context.transaction,
+        ),
+      })));
+      const nextPrivateParticipants = privateParticipants.map((participant) =>
+        participant.inviteHash && oldHashes.has(participant.inviteHash)
+          ? {
+              ...participant,
+              inviteHash: "",
+              invitationStatus: "revoked" as const,
+            }
+          : { ...participant },
+      );
+      for (const index of indexes) {
+        nextPrivateParticipants[index] = {
+          ...nextPrivateParticipants[index],
+          inviteHash,
+          invitationStatus: "active",
+        };
+      }
+
+      const writes: unknown[] = oldInvitations
+        .filter(({ document }) => document?.fields)
+        .map(({ hash, document }) => {
+          const oldInvitation = decodeFirestoreFields(document?.fields ?? {});
+          return oldInvitation.status === "active"
+            ? documentUpdateWrite(
+                documentResource(projectId, "draftInvites", hash),
+                { status: "revoked" },
+                ["status", "updatedAt"],
+                [serverTimestampTransform("updatedAt")],
+              )
+            : null;
+        })
+        .filter((write): write is NonNullable<typeof write> => write !== null);
+      writes.push(
+        draftPrivateWrite(context, {
+          ...context.privateFields,
+          participants: nextPrivateParticipants,
+        }),
+        documentUpdateWrite(
+          context.documentName,
+          { privacyVersion: 1 },
+          ["privacyVersion", "updatedAt"],
+          [serverTimestampTransform("updatedAt")],
+        ),
+        {
+          ...documentUpdateWrite(
+            inviteDocumentName,
+            {
+              draftId,
+              participantIds,
+              status: "active",
+              createdBy: actorId,
+            },
+            ["draftId", "participantIds", "status", "createdBy", "createdAt"],
+            [serverTimestampTransform("createdAt")],
+          ),
+          currentDocument: { exists: false },
+        },
+      );
+      return {
+        writes,
+        result: { status: "created", token },
+      };
+    });
+  }
+
+  async function revokeDraftInvitation(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actorId: string,
+    isGlobalAdmin: boolean,
+    body: Record<string, unknown>,
+  ) {
+    const draftId = requireString(body.draftId, "draft ID", 128);
+    const participantId = requireString(body.participantId, "participant ID", 128);
+    return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
+      if (!ownerOrAdmin(context, actorId, isGlobalAdmin)) {
+        throw new FirestoreSecurityError(403, "Only the owner or a global administrator may revoke invitations.");
+      }
+      const targetIndex = (context.privateFields.participants ?? []).findIndex(
+        (participant) => participant.participantId === participantId,
+      );
+      const inviteHash = context.privateFields.participants?.[targetIndex]?.inviteHash;
+      if (targetIndex < 0 || !inviteHash) return { result: { status: "missing" } };
+
+      const inviteDocument = await getFirestoreDocument(
+        request,
+        accessToken,
+        documentResource(projectId, "draftInvites", inviteHash),
+        context.transaction,
+      );
+      const invitation = inviteDocument?.fields
+        ? decodeFirestoreFields(inviteDocument.fields)
+        : null;
+      if (invitation?.status === "consumed") return { result: { status: "used" } };
+
+      const nextPrivateParticipants = (context.privateFields.participants ?? []).map((participant) =>
+        participant.inviteHash === inviteHash
+          ? {
+              ...participant,
+              inviteHash: "",
+              invitationStatus: "revoked" as const,
+            }
+          : { ...participant },
+      );
+      const writes: unknown[] = [
+        draftPrivateWrite(context, {
+          ...context.privateFields,
+          participants: nextPrivateParticipants,
+        }),
+        documentUpdateWrite(
+          context.documentName,
+          { privacyVersion: 1 },
+          ["privacyVersion", "updatedAt"],
+          [serverTimestampTransform("updatedAt")],
+        ),
+      ];
+      if (invitation?.status === "active") {
+        writes.push(
+          documentUpdateWrite(
+            documentResource(projectId, "draftInvites", inviteHash),
+            { status: "revoked" },
+            ["status", "updatedAt"],
+            [serverTimestampTransform("updatedAt")],
+          ),
+        );
+      }
+      return { writes, result: { status: "revoked" } };
+    });
+  }
+
+  async function claimDraftInvitation(
+    request: typeof fetch,
+    projectId: string,
+    accessToken: string,
+    actor: { uid: string; email?: string },
+    body: Record<string, unknown>,
+  ) {
+    const profile = await getUserProfile(request, accessToken, projectId, actor.uid);
+    if (!profile) throw new FirestoreSecurityError(403, "A user profile is required.");
+    const inviteHash = await hashInviteToken(body.token);
+    const inviteDocumentName = documentResource(projectId, "draftInvites", inviteHash);
+    const initialDocument = await getFirestoreDocument(request, accessToken, inviteDocumentName);
+    const initialInvitation = initialDocument?.fields
+      ? decodeFirestoreFields(initialDocument.fields)
+      : null;
+    if (!initialInvitation) return { status: "invalid" };
+    if (initialInvitation.status === "consumed") return { status: "used" };
+    if (
+      initialInvitation.status !== "active" ||
+      typeof initialInvitation.draftId !== "string" ||
+      !DRAFT_ID_PATTERN.test(initialInvitation.draftId)
+    ) {
+      return { status: "invalid" };
+    }
+
+    return runDraftTransaction(
+      request,
+      projectId,
+      accessToken,
+      initialInvitation.draftId,
+      async (context) => {
+        const inviteDocument = await getFirestoreDocument(
+          request,
+          accessToken,
+          inviteDocumentName,
+          context.transaction,
+        );
+        const invitation = inviteDocument?.fields
+          ? decodeFirestoreFields(inviteDocument.fields)
+          : null;
+        if (!invitation) return { result: { status: "invalid" } };
+        if (invitation.status === "consumed") return { result: { status: "used" } };
+        if (
+          invitation.status !== "active" ||
+          invitation.draftId !== context.draftId ||
+          context.fields.status === "completed"
+        ) {
+          return { result: { status: "invalid" } };
+        }
+
+        const participants = Array.isArray(context.fields.participants)
+          ? context.fields.participants.filter(isRecord)
+          : [];
+        const indexes = getInvitationParticipantIndexes(invitation, invitation.draftId as string, participants);
+        const privateParticipants = context.privateFields.participants ?? [];
+        if (!indexes || indexes.some((index) =>
+          privateParticipants[index]?.inviteHash !== inviteHash ||
+          Boolean(privateParticipants[index]?.userId) ||
+          participants[index].status !== "pending-registration",
+        )) {
+          return { result: { status: "invalid" } };
+        }
+
+        const nextParticipants = participants.map((participant, index) =>
+          indexes.includes(index)
+            ? { ...participant, status: "ready" }
+            : participant,
+        );
+        const nextPrivateParticipants = privateParticipants.map((participant, index) =>
+          indexes.includes(index)
+            ? {
+                ...participant,
+                userId: actor.uid,
+                email: actor.email ?? "",
+                joinedAt: new Date().toISOString(),
+                invitationStatus: "consumed" as const,
+              }
+            : { ...participant },
+        );
+        return {
+          writes: [
+            documentUpdateWrite(
+              context.documentName,
+              { participants: nextParticipants, privacyVersion: 1 },
+              ["participants", "privacyVersion", "updatedAt"],
+              [serverTimestampTransform("updatedAt")],
+            ),
+            draftPrivateWrite(context, {
+              ...context.privateFields,
+              participants: nextPrivateParticipants,
+            }),
+            documentUpdateWrite(
+              inviteDocumentName,
+              { status: "consumed", usedBy: actor.uid },
+              ["status", "usedBy", "usedAt"],
+              [serverTimestampTransform("usedAt")],
+            ),
+          ],
+          result: {
+            status: "claimed",
+            draftId: context.draftId,
+            participantIds: indexes.map((index) => participants[index].id),
+          },
+        };
+      },
+    );
+  }
+
   async function joinDraft(
     request: typeof fetch,
     projectId: string,
@@ -1447,26 +1869,24 @@ async function createDraft(
       }
 
       const displayName = typeof profile.displayName === "string" ? profile.displayName.trim() : "";
-      if (!displayName) throw new FirestoreSecurityError(400, "The account has no display name.");
       const participants = Array.isArray(context.fields.participants)
         ? context.fields.participants.filter(isRecord)
         : [];
       const privateParticipants = context.privateFields.participants ?? [];
       const slotIndex = participants.findIndex((participant, index) =>
-        (participant.status ?? "waiting") !== "ready" &&
-        !(privateParticipants[index]?.userId ?? "") &&
-        String(participant.displayName ?? participant.name ?? "").trim().toLowerCase() === displayName.toLowerCase(),
+        (participant.status ?? "waiting") === "waiting" &&
+        !(privateParticipants[index]?.userId ?? ""),
       );
       if (slotIndex < 0) {
-        throw new FirestoreSecurityError(403, "No available participant slot matches this account.");
+        throw new FirestoreSecurityError(403, "No open participant position is available.");
       }
 
       const nextParticipants = participants.map((participant, index) =>
         index === slotIndex
           ? {
               ...participant,
-              name: String(participant.name ?? displayName),
-              displayName: String(participant.displayName ?? participant.name ?? displayName),
+              name: String(participant.name || displayName || `Účastník ${slotIndex + 1}`),
+              displayName: String(participant.displayName || participant.name || displayName || `Účastník ${slotIndex + 1}`),
               status: "ready",
             }
           : participant,
@@ -1583,11 +2003,14 @@ async function createDraft(
       const publicUpdates: Record<string, unknown> = { ...updates };
       const writes: unknown[] = [];
       if (updates.participants !== undefined) {
+        const previousPublicParticipants = Array.isArray(context.fields.participants)
+          ? context.fields.participants.filter(isRecord)
+          : [];
         const { publicParticipants, privateParticipants } = participantParts(
           updates.participants,
           context.privateFields.participants,
         );
-        const currentParticipants = Array.isArray(context.fields.participants) ? context.fields.participants : [];
+        const currentParticipants = previousPublicParticipants;
         if (currentParticipants.some((previous) => {
           if (!isRecord(previous) || !Array.isArray(previous.picks) || previous.picks.length === 0) return false;
           const participant = publicParticipants.find((entry) => entry.id === previous.id);
@@ -1635,6 +2058,67 @@ async function createDraft(
           privateParticipants,
           context.privateFields.participants ?? [],
         );
+        const publicParticipantsById = new Map(
+          publicParticipants
+            .filter((participant) => typeof participant.id === "string")
+            .map((participant) => [participant.id as string, participant]),
+        );
+        const previousStatusById = new Map(
+          previousPublicParticipants
+            .filter((participant) => typeof participant.id === "string")
+            .map((participant) => [participant.id as string, participant.status]),
+        );
+        const previousPrivateParticipants = context.privateFields.participants ?? [];
+        const invalidatedInviteHashes = new Set<string>();
+        for (const previousParticipant of previousPrivateParticipants) {
+          const inviteHash = previousParticipant.inviteHash;
+          if (!inviteHash) continue;
+          const currentParticipant = publicParticipantsById.get(previousParticipant.participantId ?? "");
+          const currentPrivateParticipant = resolvedPrivateParticipants.find(
+            (participant) => participant.participantId === previousParticipant.participantId,
+          );
+          if (
+            !currentParticipant ||
+            !currentPrivateParticipant ||
+            currentPrivateParticipant.userId !== (previousParticipant.userId ?? "") ||
+            currentParticipant.status !== previousStatusById.get(previousParticipant.participantId ?? "")
+          ) {
+            invalidatedInviteHashes.add(inviteHash);
+          }
+        }
+        if (invalidatedInviteHashes.size > 0) {
+          for (let index = 0; index < resolvedPrivateParticipants.length; index += 1) {
+            const participant = resolvedPrivateParticipants[index];
+            if (participant.inviteHash && invalidatedInviteHashes.has(participant.inviteHash)) {
+              resolvedPrivateParticipants[index] = {
+                ...participant,
+                inviteHash: "",
+                invitationStatus: "revoked",
+              };
+            }
+          }
+          const inviteDocuments = await Promise.all([...invalidatedInviteHashes].map(async (hash) => ({
+            hash,
+            document: await getFirestoreDocument(
+              request,
+              accessToken,
+              documentResource(projectId, "draftInvites", hash),
+              context.transaction,
+            ),
+          })));
+          for (const { hash, document } of inviteDocuments) {
+            if (document?.fields && decodeFirestoreFields(document.fields).status === "active") {
+              writes.push(
+                documentUpdateWrite(
+                  documentResource(projectId, "draftInvites", hash),
+                  { status: "revoked" },
+                  ["status", "updatedAt"],
+                  [serverTimestampTransform("updatedAt")],
+                ),
+              );
+            }
+          }
+        }
         publicUpdates.participants = publicParticipants;
         writes.push(
           draftPrivateWrite(context, {
@@ -1750,8 +2234,7 @@ async function createDraft(
       if (
         Number(context.fields.participantCount ?? 0) !== publicParticipants.length ||
         publicParticipants.some((participant) => typeof participant.name !== "string" || !participant.name.trim()) ||
-        participantIds.some((id) => !id) ||
-        new Set(participantIds).size !== participantIds.length ||
+        participantIds.some((id, index) => !id && publicParticipants[index].status !== "pending-registration") ||
         !Array.isArray(context.fields.pickOrder) ||
         context.fields.pickOrder.length === 0 ||
         !Array.isArray(context.fields.availableItemIds) ||
@@ -1820,7 +2303,7 @@ async function createDraft(
       ) {
         throw new FirestoreSecurityError(409, "The current draft turn has changed.");
       }
-      if (participantIndexForUser(context, actorId) !== participantIndex) {
+      if (context.privateFields.participants?.[participantIndex]?.userId !== actorId) {
         throw new FirestoreSecurityError(403, "Only the participant whose turn it is may make this pick.");
       }
 
@@ -2020,11 +2503,7 @@ async function createDraft(
     const prefix = requireString(body.prefix, "search prefix", 100).trim();
     if (prefix.length < 1) return { users: [] };
     const draft = await loadDraftForAccess(request, projectId, accessToken, draftId);
-    if (!ownerOrAdmin(
-      { ...draft, accessToken, baseUrl: "", documentName: "", privateDocumentName: "" },
-      actorId,
-      isGlobalAdmin,
-    ) || draft.fields.status !== "waiting") {
+    if (!ownerOrAdmin(draft, actorId, isGlobalAdmin) || draft.fields.status !== "waiting") {
       throw new FirestoreSecurityError(403, "Only the draft owner may search users.");
     }
     const lowerPrefix = prefix.toLowerCase();
@@ -2355,8 +2834,16 @@ async function createDraft(
           actor.uid,
           requireString(body.draftId, "draft ID", 128),
         );
-    case "draft.join":
-      return joinDraft(request, projectId, accessToken, actor, body);
+      case "draft.join":
+        return joinDraft(request, projectId, accessToken, actor, body);
+      case "invite.create":
+        return createDraftInvitation(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "invite.revoke":
+        return revokeDraftInvitation(request, projectId, accessToken, actor.uid, globalAdmin, body);
+      case "invite.preview":
+        return previewDraftInvitation(request, projectId, accessToken, body);
+      case "invite.claim":
+        return claimDraftInvitation(request, projectId, accessToken, actor, body);
       case "draft.update":
         return updateDraft(request, projectId, accessToken, actor.uid, globalAdmin, body);
       case "draft.draw":

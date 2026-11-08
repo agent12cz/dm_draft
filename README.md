@@ -53,6 +53,12 @@ Drafts are split between the publicly readable `publicDrafts` collection and the
 
 All client writes to drafts, chat, user profiles, products and rankings go through `/api/firestore`. The route verifies the Firebase ID token; the Worker checks ownership, role and participant assignment, then commits the authorized changes through the Firestore REST API using the Cloudflare Worker service-account secret. Direct Firestore client writes are denied by `firestore.rules`. The rules contain no date condition or automatic expiry, so the database access policy does not stop working after 1 January 2027. Firebase Functions and Cloud Scheduler are not required; this design remains compatible with Firebase Spark quotas. Cloudflare Worker usage and Firebase Spark quotas are separate.
 
+### Player invitations
+
+Organizers can mark one or more positions as waiting for registration and create one personal invitation for the selected positions. The link carries a 256-bit random token in its URL fragment, so the token is not sent in normal page requests; the Worker stores only its SHA-256 hash in the private `draftInvites` collection and private participant data. Invitation preview and claim require an authenticated account, and the claim transaction verifies the token, binds every selected position to the verified Firebase UID, and consumes the invitation atomically. Names and email addresses are never used to bind an account. Invitations can be revoked and replaced; registered players can still use the common draft code for open positions.
+
+An unclaimed registration position remains eligible for automatic picks using the organizer ranking. After claiming, all positions linked to the account use that account's saved player priorities. The common-code join operation takes the first open position and never matches an account by name.
+
 ### Migrating existing drafts
 
 Before publishing `firestore.rules`, migrate legacy documents from `drafts` (including chat messages) to `publicDrafts` and `draftPrivate`. Deploy the application Worker with the new API before publishing the rules; otherwise clients using the old app or old Worker will no longer be able to write. Do not publish restrictive rules until the migration and Worker rollout are complete.

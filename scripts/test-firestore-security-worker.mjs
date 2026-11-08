@@ -1114,3 +1114,128 @@ await assert.rejects(
 );
 assert.equal(firestore.read("drafts/CONFLICT").title, "Legacy source");
 console.log("✓ Migration refuses conflicting destinations without deleting legacy source data");
+
+for (const uid of ["invite-new", "invite-existing", "invite-race-a", "invite-race-b"]) {
+  firestore.seed(`users/${uid}`, {
+    uid,
+    email: `${uid}@example.test`,
+    displayName: "Unrelated account name",
+    role: "participant",
+  });
+}
+
+async function makeInvitationDraft(draftId, participantIds) {
+  await operation("owner", "draft.create", {
+    draftId,
+    data: {
+      title: "Invitation test",
+      status: "waiting",
+      participantCount: participantIds.length,
+      participants: participantIds.map((id, index) => ({
+        id,
+        name: `Prepared alias ${index + 1}`,
+        displayName: `Prepared alias ${index + 1}`,
+        userId: "",
+        status: "pending-registration",
+        picks: [],
+      })),
+      pickOrder: Array.from({ length: participantIds.length }, (_, index) => index),
+      draftItems: [{ id: "team-a", name: "Team A" }, { id: "team-b", name: "Team B" }],
+      availableItemIds: ["team-a", "team-b"],
+      history: [],
+      teamRanking: ["team-a", "team-b"],
+    },
+  });
+}
+
+async function invitationHash(token) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
+  return btoa(Array.from(digest, (byte) => String.fromCharCode(byte)).join(""))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+await makeInvitationDraft("INVITE1", ["guest-a", "guest-b"]);
+const multipleSeatInvite = await operation("owner", "invite.create", {
+  draftId: "INVITE1",
+  participantIds: ["guest-a", "guest-b"],
+});
+assert.equal(multipleSeatInvite.status, "created");
+assert.match(multipleSeatInvite.token, /^[A-Za-z0-9_-]{43}$/);
+const multipleSeatInviteHash = await invitationHash(multipleSeatInvite.token);
+assert.equal(firestore.read(`draftInvites/${multipleSeatInviteHash}`).status, "active");
+assert.equal(firestore.read("publicDrafts/INVITE1").participants[0].inviteHash, undefined);
+assert.equal(firestore.read("draftPrivate/INVITE1").participants[0].inviteHash, multipleSeatInviteHash);
+assert.equal(
+  JSON.stringify([...firestore.documents.keys(), ...[...firestore.documents.values()].map((document) => JSON.stringify(document.fields))])
+    .includes(multipleSeatInvite.token),
+  false,
+);
+const preview = await operation("invite-new", "invite.preview", { token: multipleSeatInvite.token });
+assert.deepEqual(preview.participants.map((participant) => participant.id), ["guest-a", "guest-b"]);
+assert.equal(preview.status, "active");
+const claimedInvite = await operation("invite-new", "invite.claim", { token: multipleSeatInvite.token });
+assert.equal(claimedInvite.status, "claimed");
+assert.equal(firestore.read("draftPrivate/INVITE1").participants[0].userId, "invite-new");
+assert.equal(firestore.read("draftPrivate/INVITE1").participants[1].userId, "invite-new");
+assert.deepEqual(firestore.read("draftPrivate/INVITE1").playerPriorities, {});
+assert.deepEqual(
+  (await operation("owner", "draft.access", { draftId: "INVITE1" })).participants
+    .map((participant) => participant.invitationStatus),
+  ["consumed", "consumed"],
+);
+assert.equal((await operation("invite-existing", "invite.preview", { token: multipleSeatInvite.token })).status, "used");
+assert.equal((await operation("invite-existing", "invite.claim", { token: multipleSeatInvite.token })).status, "used");
+await operation("invite-new", "draft.priorities", { draftId: "INVITE1", priorities: ["team-b", "team-a"] });
+const invitationDraftAccess = await operation("owner", "draft.access", { draftId: "INVITE1" });
+await operation("owner", "draft.start", {
+  draftId: "INVITE1",
+  expectedParticipants: invitationDraftAccess.participants,
+  expectedTeamRanking: ["team-a", "team-b"],
+  participants: invitationDraftAccess.participants,
+  teamRanking: ["team-a", "team-b"],
+});
+assert.equal(firestore.read("publicDrafts/INVITE1").status, "drafting");
+await operation("invite-new", "draft.pick", {
+  draftId: "INVITE1",
+  itemId: "team-b",
+  expectedPickIndex: 0,
+});
+assert.deepEqual(firestore.read("publicDrafts/INVITE1").participants[0].picks, ["team-b"]);
+console.log("✓ A hashed one-time invitation links multiple positions by UID, supports existing accounts, and enables player picks");
+
+assert.equal(
+  (await operation("invite-new", "invite.preview", { token: "x".repeat(43) })).status,
+  "invalid",
+);
+await makeInvitationDraft("INVREVOKE", ["guest-revoked"]);
+const revokedInvite = await operation("owner", "invite.create", {
+  draftId: "INVREVOKE",
+  participantIds: ["guest-revoked"],
+});
+await operation("owner", "invite.revoke", { draftId: "INVREVOKE", participantId: "guest-revoked" });
+assert.equal((await operation("invite-existing", "invite.preview", { token: revokedInvite.token })).status, "invalid");
+assert.equal((await operation("invite-existing", "invite.claim", { token: revokedInvite.token })).status, "invalid");
+const replacementInvite = await operation("owner", "invite.create", {
+  draftId: "INVREVOKE",
+  participantIds: ["guest-revoked"],
+});
+assert.notEqual(replacementInvite.token, revokedInvite.token);
+assert.equal((await operation("invite-existing", "invite.claim", { token: replacementInvite.token })).status, "claimed");
+console.log("✓ Invalid invitations fail clearly; administrators can revoke and replace a token");
+
+await makeInvitationDraft("INVRACE", ["guest-race"]);
+const raceInvite = await operation("owner", "invite.create", {
+  draftId: "INVRACE",
+  participantIds: ["guest-race"],
+});
+const raceClaims = await Promise.all([
+  operation("invite-race-a", "invite.claim", { token: raceInvite.token }),
+  operation("invite-race-b", "invite.claim", { token: raceInvite.token }),
+]);
+assert.equal(raceClaims.filter((result) => result.status === "claimed").length, 1);
+assert.equal(raceClaims.filter((result) => result.status === "used").length, 1);
+const raceOwnerId = firestore.read("draftPrivate/INVRACE").participants[0].userId;
+assert.ok(["invite-race-a", "invite-race-b"].includes(raceOwnerId));
+console.log("✓ Concurrent claims commit atomically for only one authenticated UID");

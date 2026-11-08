@@ -7,6 +7,7 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { useAuth } from "@/components/AuthProvider";
+import { getAuthRedirect } from "@/lib/authRedirect";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -27,13 +28,19 @@ export default function RegisterPage() {
       return;
     }
 
+    const invitationRedirect = getAuthRedirect();
+    if (invitationRedirect) {
+      router.replace(invitationRedirect);
+      return;
+    }
+
     if (profile?.role === "admin") {
       router.replace("/");
       return;
     }
 
     router.replace("/join");
-  }, [loading, profile?.role, router, user]);
+  }, [loading, profile, router, user]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -72,7 +79,7 @@ export default function RegisterPage() {
 
     const success = await signUp(trimmedEmail, password, trimmedDisplayName);
     if (success) {
-      router.replace("/join");
+      router.replace(getAuthRedirect() ?? "/join");
     }
 
     setIsSubmitting(false);

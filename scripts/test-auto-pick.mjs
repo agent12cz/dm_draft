@@ -208,6 +208,40 @@ function draftFixture(overrides = {}) {
 }
 
 {
+  const update = buildAutomaticPickUpdate(
+    draftFixture({
+      participants: [
+        { name: "Unregistered player", picks: [] },
+        { userId: "linked-player", name: "Linked player", picks: [] },
+        { userId: "linked-player", name: "Linked player", picks: [] },
+      ],
+      pickOrder: [0, 1, 2],
+      playerPriorities: { "linked-player": ["team-b", "team-a"] },
+      availableItemIds: ["team-a", "team-b", "team-c"],
+    }),
+  );
+  assert.equal(update?.history.at(-1)?.itemId, "team-c");
+  assert.equal(update?.history.at(-1)?.autoPickReason, "organizer-ranking");
+
+  const linkedUpdate = buildAutomaticPickUpdate(
+    draftFixture({
+      participants: [
+        { name: "Unregistered player", picks: [] },
+        { userId: "linked-player", name: "Linked player", picks: [] },
+        { userId: "linked-player", name: "Linked player", picks: [] },
+      ],
+      pickOrder: [0, 1, 2],
+      currentPickIndex: 1,
+      playerPriorities: { "linked-player": ["team-b", "team-a"] },
+      availableItemIds: ["team-a", "team-b", "team-c"],
+    }),
+  );
+  assert.equal(linkedUpdate?.history.at(-1)?.itemId, "team-b");
+  assert.equal(linkedUpdate?.history.at(-1)?.autoPickReason, "player-priorities");
+  console.log("✓ Unclaimed prepared positions use organizer ranking; linked multi-seat players use their saved priorities");
+}
+
+{
   const teamIds = defaultDraftItems.map((team) => team.id);
   const boxOneOrder = [...teamIds];
   const boxTwoOrder = [...teamIds].reverse();
