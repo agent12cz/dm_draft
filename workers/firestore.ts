@@ -6,6 +6,9 @@ import {
   type AutoPickParticipant,
   type AutoPickUpdate,
 } from "../src/lib/autoPick";
+import { getProductSport, isProductSport, type ProductSport } from "../src/lib/products";
+import { createSportRankingKey } from "../src/lib/rankings";
+import { getTeamsForSport } from "../src/lib/sportsTeams";
 import { extendSnakeOrderForSkippedPick } from "../src/lib/snakeDraft";
 
 export type DraftWorkerEnv = {
@@ -28,6 +31,43 @@ export type DraftPickOutcome =
     };
 
 const DRAFT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+function canonicalTeamIds(sport: ProductSport) {
+  return getTeamsForSport(sport).map((team) => team.id);
+}
+
+function isCompleteTeamOrder(value: unknown, sport: ProductSport) {
+  const expectedIds = canonicalTeamIds(sport);
+  if (!Array.isArray(value) || value.length !== expectedIds.length || value.some((id) => typeof id !== "string")) {
+    return false;
+  }
+  const actualIds = value as string[];
+  return new Set(actualIds).size === expectedIds.length &&
+    expectedIds.every((id) => actualIds.includes(id));
+}
+
+function hasCanonicalDraftRoster(fields: Record<string, unknown>) {
+  return fields.sport !== undefined ||
+    (Array.isArray(fields.draftItems) && fields.draftItems.length === canonicalTeamIds("NHL").length);
+}
+
+function validateDraftRoster(fields: Record<string, unknown>, sport: ProductSport) {
+  const expectedIds = canonicalTeamIds(sport);
+  const draftItems = fields.draftItems;
+  if (
+    !Array.isArray(draftItems) ||
+    draftItems.length !== expectedIds.length ||
+    draftItems.some((item) =>
+      !isRecord(item) ||
+      typeof item.id !== "string" ||
+      !expectedIds.includes(item.id) ||
+      (typeof item.sport === "string" && item.sport !== sport)
+    ) ||
+    new Set(draftItems.filter(isRecord).map((item) => item.id)).size !== expectedIds.length
+  ) {
+    throw new FirestoreSecurityError(400, `The draft roster does not match ${sport}.`);
+  }
+}
 
 type ServiceAccount = {
   project_id?: string;
@@ -1306,6 +1346,33 @@ async function createDraft(
     const draftId = requireString(body.draftId, "draft ID", 128);
     if (!DRAFT_ID_PATTERN.test(draftId)) throw new FirestoreSecurityError(400, "Invalid draft ID.");
     const source = requireRecord(body.data, "Invalid draft data.");
+    const draftSport = getProductSport(source.sport);
+    if (!draftSport) throw new FirestoreSecurityError(400, "Unsupported draft sport.");
+    const validateRoster = source.sport !== undefined ||
+      (Array.isArray(source.draftItems) && source.draftItems.length === canonicalTeamIds("NHL").length);
+    if (validateRoster) {
+      validateDraftRoster(source, draftSport);
+      if (source.teamRanking !== undefined && !isCompleteTeamOrder(source.teamRanking, draftSport)) {
+        throw new FirestoreSecurityError(400, "The team ranking does not match the draft sport.");
+      }
+      if (source.availableItemIds !== undefined && !isCompleteTeamOrder(source.availableItemIds, draftSport)) {
+        throw new FirestoreSecurityError(400, "The available teams do not match the draft sport.");
+      }
+      if (source.pickOrder !== undefined && (
+        !Array.isArray(source.pickOrder) ||
+        source.pickOrder.length !== canonicalTeamIds(draftSport).length ||
+        source.pickOrder.some((index) =>
+          !Number.isInteger(index) ||
+          Number(index) < 0 ||
+          (Array.isArray(source.participants) && Number(index) >= source.participants.length)
+        )
+      )) {
+        throw new FirestoreSecurityError(400, "The pick order does not match the draft roster.");
+      }
+    }
+    if (source.sport !== undefined && (!Array.isArray(source.boxes) || source.boxes.length === 0)) {
+      throw new FirestoreSecurityError(400, "At least one box is required for a new draft.");
+    }
     const profile = await getUserProfile(request, accessToken, projectId, actorId);
     if (!profile) throw new FirestoreSecurityError(403, "A user profile is required.");
 
@@ -1360,6 +1427,32 @@ async function createDraft(
         ]);
         if (existingPublic || existingPrivate) {
           throw new FirestoreSecurityError(409, "Draft ID is already in use.");
+        }
+        if (source.sport !== undefined && Array.isArray(source.boxes)) {
+          const boxProductIds = source.boxes.map((box) =>
+            isRecord(box) && typeof box.productId === "string" ? box.productId : "",
+          );
+          if (boxProductIds.some((productId) => !productId)) {
+            throw new FirestoreSecurityError(400, "Every draft box must reference a product.");
+          }
+          await Promise.all([...new Set(boxProductIds)].map(async (productId) => {
+            const product = await getFirestoreDocument(
+              request,
+              accessToken,
+              documentResource(projectId, "products", productId),
+              transaction,
+            );
+            if (!product?.fields || !isRecord(product.fields)) {
+              throw new FirestoreSecurityError(400, "A selected box no longer exists.");
+            }
+            const fields = decodeFirestoreFields(product.fields);
+            if (fields.active !== true || getProductSport(fields.sport) !== draftSport) {
+              throw new FirestoreSecurityError(400, "Every selected box must be active and match the draft sport.");
+            }
+          }));
+          if (source.boxes.some((box) => isRecord(box) && box.sport !== undefined && box.sport !== draftSport)) {
+            throw new FirestoreSecurityError(400, "Draft boxes cannot mix sports.");
+          }
         }
 
         const writes = [
@@ -1943,6 +2036,12 @@ async function createDraft(
         throw new FirestoreSecurityError(403, "Only the owner or a global administrator may edit this draft.");
       }
       validateExpectedDraftState(context, body.expected);
+      if (updates.teamRanking !== undefined && hasCanonicalDraftRoster(context.fields)) {
+        const sport = getProductSport(context.fields.sport);
+        if (!sport || !isCompleteTeamOrder(updates.teamRanking, sport)) {
+          throw new FirestoreSecurityError(400, "The team ranking does not match the draft sport.");
+        }
+      }
 
       const options = isRecord(body.options) ? body.options : {};
       const currentStatus = typeof context.fields.status === "string" ? context.fields.status : "waiting";
@@ -2229,6 +2328,19 @@ async function createDraft(
         expectedState.teamRanking = body.expectedTeamRanking;
       }
       validateExpectedDraftState(context, expectedState);
+      const sport = getProductSport(context.fields.sport);
+      if (!sport) throw new FirestoreSecurityError(400, "The draft has an unsupported sport.");
+      const validateRoster = hasCanonicalDraftRoster(context.fields);
+      if (validateRoster) {
+        validateDraftRoster(context.fields, sport);
+        if (
+          !isCompleteTeamOrder(context.fields.availableItemIds, sport) ||
+          !Array.isArray(context.fields.pickOrder) ||
+          context.fields.pickOrder.length !== canonicalTeamIds(sport).length
+        ) {
+          throw new FirestoreSecurityError(400, "The draft is not ready to start with this roster.");
+        }
+      }
 
       const { publicParticipants, privateParticipants } = participantParts(
         body.participants,
@@ -2241,6 +2353,9 @@ async function createDraft(
         participantIds.some((id, index) => !id && publicParticipants[index].status !== "pending-registration") ||
         !Array.isArray(context.fields.pickOrder) ||
         context.fields.pickOrder.length === 0 ||
+        (validateRoster && context.fields.pickOrder.some((index) =>
+          !Number.isInteger(index) || Number(index) < 0 || Number(index) >= publicParticipants.length
+        )) ||
         !Array.isArray(context.fields.availableItemIds) ||
         context.fields.availableItemIds.length === 0
       ) {
@@ -2253,6 +2368,9 @@ async function createDraft(
         ranking.some((team) => typeof team !== "string")
       ) {
         throw new FirestoreSecurityError(400, "Invalid team ranking.");
+      }
+      if (validateRoster && !isCompleteTeamOrder(ranking, sport)) {
+        throw new FirestoreSecurityError(400, "The team ranking does not match the draft sport.");
       }
       const resolved = await resolveParticipantEmails(
         request,
@@ -2426,6 +2544,18 @@ async function createDraft(
     return runDraftTransaction(request, projectId, accessToken, draftId, async (context) => {
       if (participantIndexForUser(context, actorId) < 0) {
         throw new FirestoreSecurityError(403, "Only a draft participant may save priorities.");
+      }
+      if (hasCanonicalDraftRoster(context.fields)) {
+        const sport = getProductSport(context.fields.sport);
+        const validIds = new Set(sport ? canonicalTeamIds(sport) : []);
+        if (
+          !sport ||
+          priorities.length > validIds.size ||
+          priorities.some((id) => !validIds.has(id)) ||
+          new Set(priorities).size !== priorities.length
+        ) {
+          throw new FirestoreSecurityError(400, "Player priorities must use unique teams from this draft.");
+        }
       }
       const playerPriorities = { ...(context.privateFields.playerPriorities ?? {}), [actorId]: priorities };
       return {
@@ -2630,12 +2760,25 @@ async function createDraft(
     }
     const active = product.active !== false;
     const id = isUpdate ? requireString(body.productId, "product ID", 128) : crypto.randomUUID();
+    const existing = isUpdate
+      ? await getFirestoreDocument(request, accessToken, documentResource(projectId, "products", id))
+      : null;
+    const previousSport = decodeFirestoreValue(existing?.fields?.sport);
+    let sport: ProductSport;
+    if (product.sport === undefined) {
+      sport = isProductSport(previousSport) ? previousSport : "NHL";
+    } else if (isProductSport(product.sport)) {
+      sport = product.sport;
+    } else {
+      throw new FirestoreSecurityError(400, "Invalid product sport.");
+    }
     const fields = {
       name,
       season,
       defaultPrice: price,
       currency: "CZK",
       active,
+      sport,
       imageUrl: typeof product.imageUrl === "string" ? product.imageUrl.slice(0, 2048) : null,
     };
     const baseUrl = firestoreDocumentsUrl(projectId);
@@ -2679,6 +2822,14 @@ async function createDraft(
     if (productKey.includes("/")) throw new FirestoreSecurityError(400, "Invalid ranking ID.");
     const series = requireString(body.series, "series", 160).trim();
     const season = requireString(body.season, "season", 80).trim();
+    const sportValue = body.sport === undefined ? "NHL" : body.sport;
+    if (!isProductSport(sportValue)) {
+      throw new FirestoreSecurityError(400, "Invalid ranking sport.");
+    }
+    const sport: ProductSport = sportValue;
+    if (productKey !== createSportRankingKey(sport, series, season)) {
+      throw new FirestoreSecurityError(400, "Invalid ranking ID.");
+    }
     const teamOrder = body.teamOrder;
     if (
       !Array.isArray(teamOrder) ||
@@ -2692,8 +2843,23 @@ async function createDraft(
       series,
       season,
       productKey,
+      sport,
       teamOrder,
     };
+    const documentName = documentResource(projectId, "teamRankings", productKey);
+    const existing = await getFirestoreDocument(request, accessToken, documentName);
+    if (existing && body.rankingId !== productKey) {
+      throw new FirestoreSecurityError(409, "Ranking already exists.");
+    }
+    if (!existing && body.rankingId !== undefined) {
+      throw new FirestoreSecurityError(404, "Ranking does not exist.");
+    }
+    const hasCreatedAt = Boolean(existing?.fields?.createdAt);
+    const fieldPaths = Object.keys(fields).concat(hasCreatedAt ? [] : ["createdAt"], ["updatedAt"]);
+    const transforms = [
+      ...(!hasCreatedAt ? [serverTimestampTransform("createdAt")] : []),
+      serverTimestampTransform("updatedAt"),
+    ];
     const response = await request(`${firestoreDocumentsUrl(projectId)}:commit`, {
       method: "POST",
       headers: {
@@ -2702,12 +2868,12 @@ async function createDraft(
       },
       body: JSON.stringify({
         writes: [
-          documentUpdateWrite(
-            documentResource(projectId, "teamRankings", productKey),
-            fields,
-            Object.keys(fields).concat(["createdAt", "updatedAt"]),
-            [serverTimestampTransform("createdAt"), serverTimestampTransform("updatedAt")],
-          ),
+          {
+            ...documentUpdateWrite(documentName, fields, fieldPaths, transforms),
+            currentDocument: existing?.updateTime
+              ? { updateTime: existing.updateTime }
+              : { exists: false },
+          },
         ],
       }),
     });

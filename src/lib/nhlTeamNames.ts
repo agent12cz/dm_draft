@@ -1,4 +1,6 @@
 import { defaultDraftItems, type DraftItem } from "@/lib/snakeDraft";
+import { getTeamsForSport } from "@/lib/sportsTeams";
+import { isProductSport } from "@/lib/products";
 
 const nhlNames: Record<string, readonly [string, string]> = {
   "anaheim-ducks": ["Anaheim", "Ducks"],
@@ -39,4 +41,13 @@ export function getNhlTeamNameLines(item: DraftItem): readonly string[] {
   if (item.sport !== "NHL") return [item.name];
   const catalogId = defaultDraftItems.find((team) => team.name === item.name)?.id;
   return nhlNames[item.id] ?? (catalogId ? nhlNames[catalogId] : undefined) ?? [item.name];
+}
+
+export function getTeamNameLines(item: DraftItem): readonly string[] {
+  if (item.sport === "NHL") return getNhlTeamNameLines(item);
+  if (item.name.length <= 14) return [item.name];
+  if (!isProductSport(item.sport)) return [item.name];
+  const team = getTeamsForSport(item.sport)
+    .find((candidate) => candidate.id === item.id);
+  return team?.nameLines ?? [item.name];
 }

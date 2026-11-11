@@ -6,8 +6,9 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { PickHistoryTracker, PICK_ANNOUNCEMENT_DURATION_MS } from "../src/lib/pickAnnouncements.ts";
-import { getNhlTeamNameLines } from "../src/lib/nhlTeamNames.ts";
+import { getNhlTeamNameLines, getTeamNameLines } from "../src/lib/nhlTeamNames.ts";
 import { defaultDraftItems } from "../src/lib/snakeDraft.ts";
+import { getTeamsForSport } from "../src/lib/sportsTeams.ts";
 
 assert.equal(defaultDraftItems.length, 32);
 for (const team of defaultDraftItems) {
@@ -26,7 +27,25 @@ for (const [id, expected] of [
   ["montreal-canadiens", ["Montreal", "Canadiens"]],
 ]) assert.deepEqual(getNhlTeamNameLines(defaultDraftItems.find((team) => team.id === id)), expected);
 assert.deepEqual(getNhlTeamNameLines({ id: "custom", name: "Custom multi word team", sport: "NHL", logo: "" }), ["Custom multi word team"]);
-console.log("✓ All 32 catalog NHL names use explicit geographic/nickname lines, including legacy IDs; custom names are not guessed");
+for (const sport of ["NBA", "NFL", "MLB"]) {
+  for (const team of getTeamsForSport(sport)) {
+    const lines = getTeamNameLines(team);
+    assert.equal(lines.join(" "), team.name, team.name);
+    if (team.name.length > 14) assert.equal(lines.length, 2, team.name);
+    else assert.deepEqual(lines, [team.name], team.name);
+  }
+}
+for (const [sport, id, expected] of [
+  ["NBA", "nba-golden-state-warriors", ["Golden State", "Warriors"]],
+  ["NBA", "nba-new-york-knicks", ["New York", "Knicks"]],
+  ["NBA", "nba-portland-trail-blazers", ["Portland", "Trail Blazers"]],
+  ["NFL", "nfl-san-francisco-49ers", ["San Francisco", "49ers"]],
+  ["NFL", "nfl-tampa-bay-buccaneers", ["Tampa Bay", "Buccaneers"]],
+  ["MLB", "mlb-los-angeles-dodgers", ["Los Angeles", "Dodgers"]],
+]) {
+  assert.deepEqual(getTeamNameLines(getTeamsForSport(sport).find((team) => team.id === id)), expected);
+}
+console.log("✓ All league names use explicit geographic/nickname lines when long; NHL output remains unchanged");
 
 const require = createRequire(import.meta.url);
 const confirmed = { fromCache: false, hasPendingWrites: false };
@@ -96,7 +115,10 @@ runInNewContext(compiled, {
     };
     if (name === "next/image") return { __esModule: true, default: (props) => React.createElement("img", Object.fromEntries(Object.entries(props).filter(([key]) => key !== "unoptimized"))) };
     if (name === "react-dom") return { createPortal: (node, target) => { assert.equal(target, portalTarget); return node; } };
-    if (name === "@/lib/nhlTeamNames") return { getNhlTeamNameLines };
+    if (name === "@/lib/nhlTeamNames") return { getNhlTeamNameLines, getTeamNameLines };
+    if (name === "@/components/TeamLogo") {
+      return { TeamLogo: ({ team, className }) => React.createElement("span", { className }, team.name) };
+    }
     if (name === "@/lib/pickAnnouncements") return { PICK_ANNOUNCEMENT_DURATION_MS };
     return require(name);
   },
@@ -123,6 +145,18 @@ assert.equal(timeout.at, 2000);
 now = 500;
 render();
 assert.equal(timerCount, 1);
+for (const [sport, id, first, second] of [
+  ["NBA", "nba-golden-state-warriors", "Golden State", "Warriors"],
+  ["NBA", "nba-new-york-knicks", "New York", "Knicks"],
+  ["NFL", "nfl-san-francisco-49ers", "San Francisco", "49ers"],
+  ["NFL", "nfl-tampa-bay-buccaneers", "Tampa Bay", "Buccaneers"],
+  ["MLB", "mlb-los-angeles-dodgers", "Los Angeles", "Dodgers"],
+]) {
+  queue[0] = { ...queue[0], item: getTeamsForSport(sport).find((team) => team.id === id) };
+  const announcement = render();
+  assert.match(announcement, new RegExp(`class="block">${first}<\\/span><span class="block">${second}<\\/span>`));
+}
+console.log("✓ Pick announcements keep geography and team names together for long NBA, NFL and MLB names");
 assert.equal(timeout.at, 2000);
 const staleTimeout = timeout;
 queue = queue.slice(1);

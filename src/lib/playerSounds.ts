@@ -9,6 +9,7 @@ export type SoundTurn = {
   enabled: boolean;
   startedAt: number | null;
   durationSeconds: number | null;
+  secondsLeft: number | null;
 };
 
 type Tone = { stop: () => void };
@@ -21,8 +22,7 @@ export class PlayerSoundController {
   private turn: SoundTurn | null = null;
   private observedScope: string | null = null;
   private tones: Tone[] = [];
-  private planned = new Map<number, number>();
-  private played = new Set<number>();
+  private countdownBeeps = new Set<number>();
 
   constructor(
     private readonly audio: SoundAudio,
@@ -31,13 +31,8 @@ export class PlayerSoundController {
   ) {}
 
   stop() {
-    const now = this.now();
-    for (const [second, at] of this.planned) {
-      if (at <= now) this.played.add(second);
-    }
     for (const tone of this.tones) tone.stop();
     this.tones = [];
-    this.planned.clear();
   }
 
   update(turn: SoundTurn) {
@@ -51,42 +46,39 @@ export class PlayerSoundController {
     const initial = this.observedScope !== turn.scope;
     if (rescheduled) {
       this.stop();
-      if (changed) this.played.clear();
+      if (changed) this.countdownBeeps.clear();
     }
     const storageKey = `dm-sound-turn:${turn.scope}`;
     const alreadyObserved = this.storage.getItem(storageKey) === turn.key;
-    const announce = !initial && !alreadyObserved && (changed || !this.turn?.ownTurn);
+    const atTurnStart = turn.durationSeconds === null ||
+      (turn.secondsLeft !== null && turn.secondsLeft === turn.durationSeconds);
+    const announce = atTurnStart && !initial && !alreadyObserved && (changed || !this.turn?.ownTurn);
     this.observedScope = turn.scope;
     this.turn = turn;
-    if (turn.ownTurn) this.storage.setItem(storageKey, turn.key);
+    if (turn.ownTurn && atTurnStart) this.storage.setItem(storageKey, turn.key);
 
     const deadline = turn.startedAt !== null && turn.durationSeconds !== null
       ? turn.startedAt + turn.durationSeconds * 1000
       : null;
-    const now = this.now();
     if (!turn.ownTurn || !turn.enabled || !this.audio.running() ||
-      (deadline !== null && deadline <= now)) {
+      (deadline !== null && deadline <= this.now())) {
       this.stop();
       return;
     }
     if (announce) {
       for (const delay of [0, 0.18]) {
-        if (deadline === null || now + (delay + 0.12) * 1000 < deadline) {
+        if (deadline === null || this.now() + (delay + 0.12) * 1000 < deadline) {
           this.tones.push({
             stop: this.audio.tone(delay, delay === 0 ? 660 : 880, 0.12),
           });
         }
       }
     }
-    if (deadline === null) return;
-
-    // Schedule against the turn timestamp on the audio clock, not render/timer ticks.
-    for (let second = 5; second >= 1; second--) {
-      const at = deadline - second * 1000;
-      if (at < now || this.played.has(second) || this.planned.has(second)) continue;
-      this.planned.set(second, at);
+    const second = turn.secondsLeft;
+    if (second !== null && second >= 1 && second <= 5 && !this.countdownBeeps.has(second)) {
+      this.countdownBeeps.add(second);
       this.tones.push({
-        stop: this.audio.tone((at - now) / 1000, second === 1 ? 1040 : 780, second === 1 ? 0.15 : 0.09),
+        stop: this.audio.tone(0, second === 1 ? 1040 : 780, second === 1 ? 0.15 : 0.09),
       });
     }
   }
@@ -201,14 +193,15 @@ export function usePlayerSounds(turn: SoundTurn | null, setEnabled: (enabled: bo
   const ownTurn = turn?.ownTurn;
   const startedAt = turn?.startedAt;
   const durationSeconds = turn?.durationSeconds;
+  const secondsLeft = turn?.secondsLeft;
   useEffect(() => {
     if (scope === undefined || key === undefined || ownTurn === undefined ||
-      startedAt === undefined || durationSeconds === undefined) {
+      startedAt === undefined || durationSeconds === undefined || secondsLeft === undefined) {
       stop();
       return;
     }
     try {
-      controller.current?.update({ scope, key, ownTurn, enabled, startedAt, durationSeconds });
+      controller.current?.update({ scope, key, ownTurn, enabled, startedAt, durationSeconds, secondsLeft });
     } catch (failure) {
       stop();
       reportError(failure);
@@ -216,7 +209,7 @@ export function usePlayerSounds(turn: SoundTurn | null, setEnabled: (enabled: bo
     if (!ownTurn || startedAt === null || durationSeconds === null) return;
     const timeout = window.setTimeout(stop, Math.max(0, startedAt + durationSeconds * 1000 - Date.now()));
     return () => window.clearTimeout(timeout);
-  }, [scope, key, ownTurn, enabled, startedAt, durationSeconds, ready, reportError, stop]);
+  }, [scope, key, ownTurn, enabled, startedAt, durationSeconds, secondsLeft, ready, reportError, stop]);
 
   const toggle = useCallback(() => {
     const nextEnabled = !enabled;

@@ -1,10 +1,12 @@
 import { defaultDraftItems, type DraftItem } from "./snakeDraft";
+import type { ProductSport } from "./products";
 
 export type TeamRankingRecord = {
   id: string; // Document ID, equal to productKey
   series: string; // e.g. "Series One"
   season: string; // e.g. "2026/27"
   productKey: string; // Unique key combining series and season
+  sport?: ProductSport;
   teamOrder: string[]; // All team IDs in order of attractiveness (index 0 = rank 1)
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -13,6 +15,7 @@ export type TeamRankingRecord = {
 export type BoxSelection = {
   id?: string;
   productId?: string;
+  sport?: ProductSport;
   productName: string;
   productSeason: string;
   boxCount: number;
@@ -59,6 +62,18 @@ export function createProductKey(series: string, season: string): string {
     .replace(/(^-|-$)/g, "");
 
   return `${cleanSeries || "unnamed"}__${cleanSeason || "general"}`;
+}
+
+export function createSportRankingKey(sport: ProductSport, series: string, season: string): string {
+  const productKey = createProductKey(series, season);
+  return sport === "NHL" ? productKey : `${sport.toLowerCase()}__${productKey}`;
+}
+
+export function filterRankingsBySport(
+  rankings: TeamRankingRecord[],
+  sport: ProductSport,
+): TeamRankingRecord[] {
+  return rankings.filter((ranking) => (ranking.sport ?? "NHL") === sport);
 }
 
 /**
@@ -131,11 +146,15 @@ export function calculateCombinedTeamRanking(
   // Resolve a complete team order for each box.
   const boxRankings = validBoxes.map((box) => {
     const productKey = createProductKey(box.productName, box.productSeason);
+    const sport = box.sport ?? "NHL";
+    const sportRankingKey = createSportRankingKey(sport, box.productName, box.productSeason);
+    const savedRanking = customRankingsByProductKey[sportRankingKey] ??
+      (sport === "NHL" ? customRankingsByProductKey[productKey] : undefined);
     const order =
       box.teamOrder && box.teamOrder.length > 0
         ? ensureAllTeamsInOrder(box.teamOrder, allTeams)
-        : customRankingsByProductKey[productKey]
-          ? ensureAllTeamsInOrder(customRankingsByProductKey[productKey], allTeams)
+        : savedRanking
+          ? ensureAllTeamsInOrder(savedRanking, allTeams)
           : allTeams.map((t) => t.id);
 
     const rankMap = new Map<string, number>();

@@ -8,7 +8,7 @@ import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
 import { callFirestoreWorker, getDraftPrivateAccess } from "@/lib/firestoreWorker";
-import { normalizeDraftItem } from "@/lib/snakeDraft";
+import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import AuthGuard from "@/app/auth-guard";
 import { useAuth } from "@/components/AuthProvider";
@@ -16,6 +16,7 @@ import { DraftChat } from "@/components/DraftChat";
 import { animateParticipantDraw, drawParticipantOrder, ParticipantDrawError } from "@/lib/participantDraw";
 import { startDraft, StartDraftError } from "@/lib/startDraft";
 import { commitParticipantUpdate, ParticipantUpdateConflict } from "@/lib/participantUpdate";
+import { TeamLogo as SharedTeamLogo } from "@/components/TeamLogo";
 
 type DraftParticipant = {
   id: string;
@@ -164,18 +165,7 @@ function getTurnDurationOption(value: number | null): TurnDurationOption {
 }
 
 function TeamLogo({ item, className = "h-8 w-8" }: { item?: DraftItem | null; className?: string }) {
-  const teamName = item?.name ?? "";
-  const slug = teamName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-  const logoSrc = slug ? `/logos/nhl/${slug}.png` : "";
-
-  if (!teamName || !logoSrc) {
-    return null;
-  }
-
-  return <img src={logoSrc} alt={teamName} width={32} height={32} className={className} />;
+  return item ? <SharedTeamLogo team={item} width={32} height={32} className={className} /> : null;
 }
 
 const INVALID_PICK_MESSAGE = "Výběr už není platný. Stav draftu byl aktualizován.";
@@ -362,7 +352,10 @@ function DraftDetailPageContent() {
                 participantSnapshot: access.participants,
                 currentPickIndex: Number(data.currentPickIndex ?? 0),
                 pickOrder: (data.pickOrder ?? []) as number[],
-                draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+                draftItems: (Array.isArray(data.draftItems) && data.draftItems.length > 0
+                  ? data.draftItems as Array<DraftItem | string>
+                  : defaultDraftItems
+                ).map((item) => normalizeDraftItem(item)),
                 availableItemIds: (data.availableItemIds ?? []) as string[],
                 history: (data.history ?? []) as DraftHistoryItem[],
                 turnDurationSeconds: resolvedTurnDurationSeconds,
@@ -375,7 +368,7 @@ function DraftDetailPageContent() {
 
               setDraft(draftData);
               if (Array.isArray(data.teamRanking) && data.teamRanking.length > 0) {
-                setRankingOrder(ensureAllTeamsInOrder(data.teamRanking as string[]));
+                setRankingOrder(ensureAllTeamsInOrder(data.teamRanking as string[], draftData.draftItems));
               } else {
                 setRankingOrder(draftData.draftItems.map((item) => item.id));
               }
@@ -656,7 +649,7 @@ function DraftDetailPageContent() {
     setIsSavingRanking(true);
     setRankingFeedback(null);
     try {
-      const validOrder = ensureAllTeamsInOrder(rankingOrder);
+      const validOrder = ensureAllTeamsInOrder(rankingOrder, draft.draftItems);
       await callFirestoreWorker("draft.update", {
         draftId: draft.id,
         updates: {
@@ -1215,9 +1208,9 @@ function DraftDetailPageContent() {
       const { db, firestoreApi } = await getFirebaseClient();
       const finalTeamRanking =
         rankingOrder.length > 0
-          ? ensureAllTeamsInOrder(rankingOrder)
+          ? ensureAllTeamsInOrder(rankingOrder, draft.draftItems)
           : draft.teamRanking && draft.teamRanking.length > 0
-            ? ensureAllTeamsInOrder(draft.teamRanking)
+            ? ensureAllTeamsInOrder(draft.teamRanking, draft.draftItems)
             : draft.draftItems.map((item) => item.id);
 
       await startDraft(

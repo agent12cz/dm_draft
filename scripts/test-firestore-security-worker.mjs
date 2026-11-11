@@ -8,6 +8,8 @@ import {
   runExpiredDraftPicks,
   runLegacyDraftPrivacyMigration,
 } from "../workers/firestore.ts";
+import { buildSnakeOrder, defaultDraftItems } from "../src/lib/snakeDraft.ts";
+import { getTeamsForSport } from "../src/lib/sportsTeams.ts";
 
 const PROJECT_ID = "dm-draft-security-test";
 const serviceAccount = await crypto.subtle.generateKey(
@@ -326,6 +328,112 @@ async function operation(actorId, name, payload = {}) {
   );
 }
 
+const createdBasketballBox = await operation("global-admin", "product.create", {
+  product: {
+    name: "NBA hobby box",
+    season: "2026/27",
+    defaultPrice: 1200,
+    active: true,
+    imageUrl: "/nba-box.png",
+    sport: "NBA",
+  },
+});
+assert.equal(firestore.read(`products/${createdBasketballBox.productId}`).sport, "NBA");
+assert.equal(firestore.read(`products/${createdBasketballBox.productId}`).active, true);
+
+firestore.seed("products/legacy-nhl-box", {
+  name: "Legacy NHL box",
+  season: "2025/26",
+  defaultPrice: 900,
+  active: true,
+  imageUrl: null,
+});
+await operation("global-admin", "product.update", {
+  productId: createdBasketballBox.productId,
+  product: {
+    name: "NBA hobby box",
+    season: "2026/27",
+    defaultPrice: 1100,
+    active: false,
+    imageUrl: "/nba-box-updated.png",
+  },
+});
+await operation("global-admin", "product.update", {
+  productId: "legacy-nhl-box",
+  product: {
+    name: "Legacy NHL box",
+    season: "2025/26",
+    defaultPrice: 950,
+    active: true,
+    imageUrl: null,
+  },
+});
+assert.equal(firestore.read(`products/${createdBasketballBox.productId}`).sport, "NBA");
+assert.equal(firestore.read(`products/${createdBasketballBox.productId}`).active, false);
+assert.equal(firestore.read("products/legacy-nhl-box").sport, "NHL");
+
+const legacyNhlOrder = defaultDraftItems.map((team) => team.id).reverse();
+firestore.seed("teamRankings/series-one__2026-27", {
+  series: "Series One",
+  season: "2026/27",
+  productKey: "series-one__2026-27",
+  teamOrder: legacyNhlOrder,
+  createdAt: "original-created-at",
+});
+const sportRankingOrders = {
+  NBA: ["nba-atlanta-hawks", "nba-boston-celtics"],
+  NFL: ["nfl-arizona-cardinals", "nfl-atlanta-falcons"],
+  MLB: ["mlb-arizona-diamondbacks", "mlb-atlanta-braves"],
+};
+for (const [sport, teamOrder] of Object.entries(sportRankingOrders)) {
+  const productKey = `${sport.toLowerCase()}__series-one__2026-27`;
+  await operation("global-admin", "ranking.save", {
+    productKey,
+    sport,
+    series: "Series One",
+    season: "2026/27",
+    teamOrder,
+  });
+  assert.deepEqual(firestore.read(`teamRankings/${productKey}`).teamOrder, teamOrder);
+  assert.equal(firestore.read(`teamRankings/${productKey}`).sport, sport);
+}
+await assert.rejects(
+  operation("global-admin", "ranking.save", {
+    productKey: "nba__series-one__2026-27",
+    sport: "NBA",
+    series: "Series One",
+    season: "2026/27",
+    teamOrder: ["nba-boston-celtics"],
+  }),
+  (error) => error.status === 409,
+);
+const nbaRankingCreatedAt = firestore.read("teamRankings/nba__series-one__2026-27").createdAt;
+await operation("global-admin", "ranking.save", {
+  productKey: "nba__series-one__2026-27",
+  rankingId: "nba__series-one__2026-27",
+  sport: "NBA",
+  series: "Series One",
+  season: "2026/27",
+  teamOrder: ["nba-boston-celtics", "nba-atlanta-hawks"],
+});
+assert.deepEqual(firestore.read("teamRankings/nba__series-one__2026-27").createdAt, nbaRankingCreatedAt);
+assert.deepEqual(
+  firestore.read("teamRankings/nba__series-one__2026-27").teamOrder,
+  ["nba-boston-celtics", "nba-atlanta-hawks"],
+);
+assert.deepEqual(firestore.read("teamRankings/series-one__2026-27").teamOrder, legacyNhlOrder);
+assert.equal(firestore.read("teamRankings/series-one__2026-27").sport, undefined);
+await assert.rejects(
+  operation("global-admin", "ranking.save", {
+    productKey: "series-one__2026-27",
+    sport: "NBA",
+    series: "Series One",
+    season: "2026/27",
+    teamOrder: sportRankingOrders.NBA,
+  }),
+  (error) => error.status === 400,
+);
+
 function loadClientHelper(path) {
   const source = readFileSync(new URL(path, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, {
@@ -393,6 +501,91 @@ assert.equal(publicDraft.participants[0].participantPin, undefined);
 assert.equal(privateDraft.ownerUserId, "owner");
 assert.equal(privateDraft.participants[0].email, "player1@example.test");
 console.log("✓ Draft creation stores ownership and participant credentials outside public documents");
+
+{
+  const productIds = {};
+  for (const sport of ["NHL", "NBA", "NFL", "MLB"]) {
+    const product = await operation("global-admin", "product.create", {
+      product: {
+        name: `${sport} test box`,
+        season: "2026",
+        defaultPrice: 100,
+        active: true,
+        sport,
+      },
+    });
+    productIds[sport] = product.productId;
+  }
+
+  for (const sport of ["NHL", "NBA", "NFL", "MLB"]) {
+    const teams = getTeamsForSport(sport);
+    const draftId = `${sport}-TEST`;
+    const participant = { id: "p1", name: "Player One", userId: "player-1", status: "ready", picks: [] };
+    const teamOrder = teams.map((team) => team.id);
+    const data = {
+      title: `${sport} roster test`,
+      sport,
+      status: "waiting",
+      boxes: [{ sport, productId: productIds[sport], productName: `${sport} test box`, productSeason: "2026", boxCount: 1, boxPrice: 100 }],
+      participantCount: 1,
+      participants: [participant],
+      pickOrder: buildSnakeOrder(1, teams.length),
+      draftItems: teams,
+      availableItemIds: teamOrder,
+      teamRanking: teamOrder,
+      history: [],
+    };
+
+    await operation("owner", "draft.create", { draftId, data });
+    assert.equal(firestore.read(`publicDrafts/${draftId}`).sport, sport);
+    assert.deepEqual(firestore.read(`publicDrafts/${draftId}`).availableItemIds, teamOrder);
+    await operation("player-1", "draft.priorities", { draftId, priorities: [...teamOrder].reverse() });
+    await operation("owner", "draft.start", { draftId, participants: [participant], teamRanking: teamOrder });
+    for (let index = 0; index < teams.length; index += 1) {
+      await operation("player-1", "draft.pick", {
+        draftId,
+        itemId: teams[index].id,
+        expectedPickIndex: index,
+      });
+    }
+    const finished = firestore.read(`publicDrafts/${draftId}`);
+    assert.equal(finished.status, "completed");
+    assert.deepEqual(finished.availableItemIds, []);
+    assert.equal(finished.history.length, teams.length);
+  }
+
+  const invalidRoster = getTeamsForSport("NHL");
+  await assert.rejects(
+    operation("owner", "draft.create", {
+      draftId: "MIXED-SPORT",
+      data: {
+        sport: "NBA",
+        boxes: [{ sport: "NBA", productId: productIds.NBA }],
+        draftItems: invalidRoster,
+        availableItemIds: invalidRoster.map((team) => team.id),
+        teamRanking: invalidRoster.map((team) => team.id),
+      },
+    }),
+    (error) => error.status === 400,
+  );
+  assert.equal(firestore.read("publicDrafts/MIXED-SPORT"), null);
+  const nbaTeams = getTeamsForSport("NBA");
+  await assert.rejects(
+    operation("owner", "draft.create", {
+      draftId: "MIXED-BOX",
+      data: {
+        sport: "NBA",
+        boxes: [{ sport: "NBA", productId: productIds.NHL }],
+        draftItems: nbaTeams,
+        availableItemIds: nbaTeams.map((team) => team.id),
+        teamRanking: nbaTeams.map((team) => team.id),
+      },
+    }),
+    (error) => error.status === 400,
+  );
+  assert.equal(firestore.read("publicDrafts/MIXED-BOX"), null);
+  console.log("✓ NHL, NBA, NFL and MLB drafts create, start, pick every league team, and reject mismatched rosters");
+}
 
 const nameMatches = await operation("owner", "draft.search-users", {
   draftId: "ROOM1",

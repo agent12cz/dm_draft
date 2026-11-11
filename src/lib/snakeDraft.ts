@@ -3,6 +3,8 @@ export type DraftItem = {
   name: string;
   sport: string;
   logo: string;
+  abbreviation?: string;
+  nameLines?: readonly [string, string];
 };
 
 export const defaultDraftItems: DraftItem[] = [
@@ -64,6 +66,7 @@ export function normalizeDraftItem(item: DraftItem | string | null | undefined):
       name,
       sport: typeof item.sport === "string" ? item.sport : "NHL",
       logo: logo || team?.logo || "",
+      abbreviation: typeof item.abbreviation === "string" ? item.abbreviation : undefined,
     };
   }
 

@@ -5,7 +5,8 @@ import { runInNewContext } from "node:vm";
 import React, { isValidElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
-import { getNhlTeamNameLines } from "../src/lib/nhlTeamNames.ts";
+import { getNhlTeamNameLines, getTeamNameLines } from "../src/lib/nhlTeamNames.ts";
+import { getTeamsForSport } from "../src/lib/sportsTeams.ts";
 import { defaultDraftItems } from "../src/lib/snakeDraft.ts";
 
 const require = createRequire(import.meta.url);
@@ -122,8 +123,9 @@ const component = load("../src/components/PlayerDraftPage.tsx", {
   "@/components/Card": { Card: container },
   "@/components/DraftChat": { DraftChat: () => null },
   "@/components/PickAnnouncement": { PickAnnouncement: announcement },
+  "@/components/TeamLogo": { TeamLogo: ({ team, className }) => React.createElement("span", { className }, team.name) },
   "@/lib/pickAnnouncements": load("../src/lib/pickAnnouncements.ts", {}),
-  "@/lib/nhlTeamNames": { getNhlTeamNameLines },
+  "@/lib/nhlTeamNames": { getNhlTeamNameLines, getTeamNameLines },
   "@/lib/firebase": firebase,
   "@/lib/firestoreWorker": {
     ...worker,
@@ -161,6 +163,14 @@ function find(node, predicate) {
   if (Array.isArray(node)) return node.map((child) => find(child, predicate)).find(Boolean);
   if (!isValidElement(node)) return undefined;
   return predicate(node) ? node : find(node.props.children, predicate);
+}
+function findAll(node, predicate, matches = []) {
+  if (Array.isArray(node)) node.forEach((child) => findAll(child, predicate, matches));
+  else if (isValidElement(node)) {
+    if (predicate(node)) matches.push(node);
+    findAll(node.props.children, predicate, matches);
+  }
+  return matches;
 }
 function saveButton() {
   const button = find(render(), (node) => node.type === "button" && String(node.props.children).includes("Uložit priority"));
@@ -313,16 +323,26 @@ draft.draftItems = defaultDraftItems;
 draft.availableItemIds = defaultDraftItems.map((item) => item.id);
 state[8] = "teams";
 state[9] = "teams";
-const teamView = render();
-for (const item of defaultDraftItems) {
-  const lines = getNhlTeamNameLines(item);
-  const name = find(teamView, (node) => node.type === "p" && Array.isArray(node.props.children) &&
-    node.props.children.length === 2 && node.props.children.every((child, index) => child.props?.children === lines[index]));
-  assert.ok(name, item.name);
-  assert.match(name.props.className, /min-h-\[2\.5em\] w-full min-w-0/);
-  assert.ok(name.props.children.every((line) => line.props.className === "block truncate"));
+for (const sport of ["NHL", "NBA", "NFL", "MLB"]) {
+  const teams = sport === "NHL" ? defaultDraftItems : getTeamsForSport(sport);
+  draft.sport = sport;
+  draft.draftItems = teams;
+  draft.availableItemIds = teams.map((item) => item.id);
+  const teamView = render();
+  for (const item of teams) {
+    const lines = getTeamNameLines(item);
+    const name = findAll(teamView, (node) => node.type === "p" && Array.isArray(node.props.children))
+      .find((paragraph) => paragraph.props.children.length === lines.length &&
+        paragraph.props.children.every((child, index) => child.props?.children === lines[index]));
+    assert.ok(name, `${sport} ${item.name}`);
+    assert.match(name.props.className, /min-h-\[2\.5em\] w-full min-w-0/);
+    assert.ok(name.props.children.every((line) => line.props.className === "block truncate"));
+  }
 }
-console.log("✓ All 32 selection cards share the announcement's explicit two-line NHL names without changing logo sizes");
+draft.sport = "NHL";
+draft.draftItems = defaultDraftItems;
+draft.availableItemIds = defaultDraftItems.map((item) => item.id);
+console.log("✓ Selection cards in all four leagues use explicit compact name lines without changing logo sizes");
 
 reset();
 draft.status = "drafting";

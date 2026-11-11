@@ -1,10 +1,10 @@
 "use client";
 
-import Image from "next/image";
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
-import { getNhlTeamNameLines } from "@/lib/nhlTeamNames";
+import { getTeamNameLines } from "@/lib/nhlTeamNames";
 import { PICK_ANNOUNCEMENT_DURATION_MS, type PickAnnouncement as PickEvent } from "@/lib/pickAnnouncements";
+import { TeamLogo } from "@/components/TeamLogo";
 
 export function PickAnnouncement({ event, onComplete }: {
   event: PickEvent;
@@ -29,13 +29,11 @@ export function PickAnnouncement({ event, onComplete }: {
           <p className="text-xs font-black uppercase tracking-[0.3em] text-[#8ef0b5]">PRÁVĚ VYBRÁNO</p>
         </div>
         <div className="flex min-w-0 flex-col items-center gap-3 px-5 py-4 sm:py-5">
-          {event.item.logo ? (
-            <Image src={event.item.logo} alt={event.item.name} width={112} height={112} unoptimized className="h-24 w-24 shrink-0 object-contain sm:h-28 sm:w-28" />
-          ) : <span aria-hidden="true" className="flex h-24 w-24 shrink-0 items-center justify-center rounded-xl bg-slate-800 text-2xl font-black text-slate-300">{event.item.name.slice(0, 3).toUpperCase()}</span>}
+          <TeamLogo team={event.item} width={112} height={112} className="h-24 w-24 shrink-0 object-contain sm:h-28 sm:w-28" />
           <div className="min-w-0">
             <p className="break-words text-sm font-semibold text-slate-300">{event.participantName} vybral</p>
             <p className="mt-1 break-words text-xl font-black leading-tight text-white sm:text-3xl">
-              {getNhlTeamNameLines(event.item).map((line, index) => <span key={index} className="block">{line}</span>)}
+              {getTeamNameLines(event.item).map((line, index) => <span key={index} className="block">{line}</span>)}
             </p>
             {event.automatic ? <p className="mt-2 text-xs text-slate-400">Automatický výběr</p> : null}
           </div>

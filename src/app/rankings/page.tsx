@@ -5,14 +5,18 @@ import Link from "next/link";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
+import { TeamLogo } from "@/components/TeamLogo";
 import { getFirebaseClient } from "@/lib/firebase";
 import { callFirestoreWorker } from "@/lib/firestoreWorker";
-import { defaultDraftItems, type DraftItem } from "@/lib/snakeDraft";
+import type { DraftItem } from "@/lib/snakeDraft";
 import {
-  createProductKey,
+  createSportRankingKey,
   ensureAllTeamsInOrder,
+  filterRankingsBySport,
   type TeamRankingRecord,
 } from "@/lib/rankings";
+import { getProductSport, productSports, type ProductSport } from "@/lib/products";
+import { getTeamsForSport } from "@/lib/sportsTeams";
 import AuthGuard from "@/app/auth-guard";
 
 type Product = {
@@ -23,11 +27,16 @@ type Product = {
   currency: "CZK";
   active: boolean;
   imageUrl?: string;
+  sport: ProductSport;
 };
 
 function RankingsPageContent() {
+  const [selectedSport, setSelectedSport] = useState<ProductSport>("NHL");
   const [rankings, setRankings] = useState<TeamRankingRecord[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [currentTeamOrder, setCurrentTeamOrder] = useState<string[]>(() =>
+    getTeamsForSport("NHL").map((item) => item.id),
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,9 +47,7 @@ function RankingsPageContent() {
   const [editingId, setEditingId] = useState<string | null>(null); // productKey if editing existing
   const [seriesInput, setSeriesInput] = useState("");
   const [seasonInput, setSeasonInput] = useState("");
-  const [currentTeamOrder, setCurrentTeamOrder] = useState<string[]>(() =>
-    defaultDraftItems.map((item) => item.id),
-  );
+  const allTeams = useMemo(() => getTeamsForSport(selectedSport), [selectedSport]);
   const [copySourceId, setCopySourceId] = useState<string>("");
 
   // Drag & drop state
@@ -60,26 +67,40 @@ function RankingsPageContent() {
 
       // Load products
       const productsSnapshot = await firestoreApi.getDocs(firestoreApi.collection(db, "products"));
-      const loadedProducts = productsSnapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...(doc.data() as Omit<Product, "id">),
-      })) as Product[];
+      const loadedProducts = productsSnapshot.docs
+        .map((doc) => {
+          const data = doc.data();
+          const sport = getProductSport(data.sport);
+          if (!sport) return null;
+          return {
+            id: doc.id,
+            ...(data as Omit<Product, "id" | "sport">),
+            sport,
+          } as Product;
+        })
+        .filter((product): product is Product => product !== null);
       setProducts(loadedProducts);
 
       // Load rankings
       const rankingsSnapshot = await firestoreApi.getDocs(firestoreApi.collection(db, "teamRankings"));
-      const loadedRankings = rankingsSnapshot.docs.map((doc) => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          series: (data.series as string) || "",
-          season: (data.season as string) || "",
-          productKey: (data.productKey as string) || doc.id,
-          teamOrder: ensureAllTeamsInOrder(data.teamOrder as string[]),
-          createdAt: data.createdAt,
-          updatedAt: data.updatedAt,
-        } as TeamRankingRecord;
-      });
+      const loadedRankings = rankingsSnapshot.docs
+        .map((doc) => {
+          const data = doc.data();
+          const sport = getProductSport(data.sport);
+          if (!sport) return null;
+          const sportTeams = getTeamsForSport(sport);
+          return {
+            id: doc.id,
+            series: (data.series as string) || "",
+            season: (data.season as string) || "",
+            productKey: (data.productKey as string) || doc.id,
+            sport,
+            teamOrder: ensureAllTeamsInOrder(data.teamOrder as string[], sportTeams),
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt,
+          } as TeamRankingRecord;
+        })
+        .filter((ranking): ranking is TeamRankingRecord => ranking !== null);
 
       // Sort alphabetically by series and season
       loadedRankings.sort((a, b) => {
@@ -97,23 +118,47 @@ function RankingsPageContent() {
     }
   }
 
-  const currentProductKey = useMemo(() => {
-    return createProductKey(seriesInput, seasonInput);
-  }, [seriesInput, seasonInput]);
+  const currentProductKey = useMemo(
+    () => createSportRankingKey(selectedSport, seriesInput, seasonInput),
+    [selectedSport, seriesInput, seasonInput],
+  );
 
   const teamLookup = useMemo(() => {
     const map = new Map<string, DraftItem>();
-    for (const team of defaultDraftItems) {
+    for (const team of allTeams) {
       map.set(team.id, team);
     }
     return map;
-  }, []);
+  }, [allTeams]);
+
+  const sportRankings = useMemo(
+    () => filterRankingsBySport(rankings, selectedSport),
+    [rankings, selectedSport],
+  );
+
+  const sportProducts = useMemo(
+    () => products.filter((product) => product.sport === selectedSport),
+    [products, selectedSport],
+  );
+
+  const sportProductsWithRankingStatus = useMemo(() => {
+    return sportProducts.map((product) => {
+      const key = createSportRankingKey(selectedSport, product.name, product.season);
+      const existingRanking = sportRankings.find((ranking) => ranking.id === key);
+      return {
+        product,
+        key,
+        hasRanking: Boolean(existingRanking),
+        ranking: existingRanking ?? null,
+      };
+    });
+  }, [sportProducts, sportRankings, selectedSport]);
 
   function handleStartCreateNew(prefillSeries = "", prefillSeason = "") {
     setEditingId(null);
     setSeriesInput(prefillSeries);
     setSeasonInput(prefillSeason);
-    setCurrentTeamOrder(defaultDraftItems.map((item) => item.id));
+    setCurrentTeamOrder(allTeams.map((item) => item.id));
     setCopySourceId("");
     setError(null);
     setSuccessMessage(null);
@@ -124,7 +169,7 @@ function RankingsPageContent() {
     setEditingId(ranking.id);
     setSeriesInput(ranking.series);
     setSeasonInput(ranking.season);
-    setCurrentTeamOrder(ensureAllTeamsInOrder(ranking.teamOrder));
+    setCurrentTeamOrder(ensureAllTeamsInOrder(ranking.teamOrder, allTeams));
     setCopySourceId("");
     setError(null);
     setSuccessMessage(null);
@@ -133,9 +178,9 @@ function RankingsPageContent() {
 
   function handleCopyOrderFrom(sourceId: string) {
     if (!sourceId) return;
-    const source = rankings.find((r) => r.id === sourceId);
+    const source = sportRankings.find((r) => r.id === sourceId);
     if (source) {
-      setCurrentTeamOrder(ensureAllTeamsInOrder(source.teamOrder));
+      setCurrentTeamOrder(ensureAllTeamsInOrder(source.teamOrder, allTeams));
       setSuccessMessage(`Pořadí ${source.teamOrder.length} týmů bylo zkopírováno ze žebříčku „${source.series} ${source.season}“.`);
     }
   }
@@ -165,9 +210,9 @@ function RankingsPageContent() {
 
   function handleApplyPreset(preset: "default" | "alphabetical" | "reverse") {
     if (preset === "default") {
-      setCurrentTeamOrder(defaultDraftItems.map((item) => item.id));
+      setCurrentTeamOrder(allTeams.map((item) => item.id));
     } else if (preset === "alphabetical") {
-      const sorted = [...defaultDraftItems].sort((a, b) =>
+      const sorted = [...allTeams].sort((a, b) =>
         a.name.localeCompare(b.name, "cs", { sensitivity: "base" }),
       );
       setCurrentTeamOrder(sorted.map((item) => item.id));
@@ -185,8 +230,13 @@ function RankingsPageContent() {
       return;
     }
 
-    const productKey = createProductKey(cleanSeries, cleanSeason);
-    const finalOrder = ensureAllTeamsInOrder(currentTeamOrder);
+    const rankingKey = createSportRankingKey(selectedSport, cleanSeries, cleanSeason);
+    const finalOrder = ensureAllTeamsInOrder(currentTeamOrder, allTeams);
+    const conflictingRanking = sportRankings.find((ranking) => ranking.id === rankingKey);
+    if (conflictingRanking && editingId !== conflictingRanking.id) {
+      setError("Žebříček pro tento sport, sérii a sezónu už existuje. Otevřete jej přes Upravit.");
+      return;
+    }
 
     setIsSaving(true);
     setError(null);
@@ -194,13 +244,15 @@ function RankingsPageContent() {
 
     try {
       await callFirestoreWorker("ranking.save", {
-        productKey,
+        productKey: rankingKey,
+        rankingId: editingId === rankingKey ? editingId : undefined,
+        sport: selectedSport,
         series: cleanSeries,
         season: cleanSeason,
         teamOrder: finalOrder,
       });
 
-      setSuccessMessage(`Žebříček pro „${cleanSeries} ${cleanSeason}“ byl úspěšně uložen.`);
+      setSuccessMessage(`Žebříček ${selectedSport} pro „${cleanSeries} ${cleanSeason}“ byl úspěšně uložen.`);
       setIsEditing(false);
       await loadData();
     } catch (saveError) {
@@ -226,20 +278,6 @@ function RankingsPageContent() {
     }
   }
 
-  // Pre-filter products to check which have rankings
-  const productsWithRankingStatus = useMemo(() => {
-    return products.map((prod) => {
-      const key = createProductKey(prod.name, prod.season);
-      const existingRanking = rankings.find((r) => r.id === key);
-      return {
-        product: prod,
-        key,
-        hasRanking: Boolean(existingRanking),
-        ranking: existingRanking ?? null,
-      };
-    });
-  }, [products, rankings]);
-
   return (
     <div className="min-h-screen text-slate-100">
       <Navbar />
@@ -253,13 +291,13 @@ function RankingsPageContent() {
                 <span className="rounded-full border border-[#18C964]/30 bg-[#18C964]/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.25em] text-[#8ef0b5]">
                   Administrace
                 </span>
-                <span className="text-xs text-slate-400">NHL Attractiveness Rankings</span>
+                <span className="text-xs text-slate-400">{selectedSport} Attractiveness Rankings</span>
               </div>
               <h1 className="mt-2 text-2xl font-black tracking-tight text-white sm:text-3xl">
-                Žebříčky atraktivity týmů NHL
+                Žebříčky atraktivity týmů {selectedSport}
               </h1>
               <p className="mt-1 text-sm text-slate-400">
-                Každá série a ročník boxu má vlastní žebříček týmů daného sportu, který slouží jako základ pro automatické draftování.
+                Každá série a ročník boxu má vlastní pořadí atraktivity týmů.
               </p>
             </div>
 
@@ -282,6 +320,32 @@ function RankingsPageContent() {
             </div>
           </div>
 
+          <div className="flex flex-wrap gap-2" role="tablist" aria-label="Sport">
+            {productSports.map((sport) => (
+              <button
+                key={sport}
+                type="button"
+                role="tab"
+                id={`rankings-tab-${sport.toLowerCase()}`}
+                aria-selected={selectedSport === sport}
+                aria-controls="rankings-panel"
+                disabled={isEditing}
+                onClick={() => {
+                  setSelectedSport(sport);
+                  setError(null);
+                  setSuccessMessage(null);
+                }}
+                className={`rounded-xl border px-4 py-2 text-sm font-bold transition ${
+                  selectedSport === sport
+                    ? "border-[#18C964]/50 bg-[#18C964]/15 text-[#8ef0b5]"
+                    : "border-slate-800 bg-slate-950/60 text-slate-400 hover:border-slate-700 hover:text-white"
+                } disabled:cursor-not-allowed disabled:opacity-60`}
+              >
+                {sport}
+              </button>
+            ))}
+          </div>
+
           {/* Feedback messages */}
           {error && (
             <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
@@ -296,7 +360,8 @@ function RankingsPageContent() {
 
           {/* EDITOR VIEW */}
           {isEditing ? (
-            <Card className="space-y-6 border border-[#18C964]/30 bg-slate-900/95 p-6 shadow-2xl backdrop-blur-md sm:p-8">
+            <div id="rankings-panel" role="tabpanel" aria-labelledby={`rankings-tab-${selectedSport.toLowerCase()}`}>
+              <Card className="space-y-6 border border-[#18C964]/30 bg-slate-900/95 p-6 shadow-2xl backdrop-blur-md sm:p-8">
               <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-5">
                 <div>
                   <span className="text-xs font-bold uppercase tracking-widest text-[#8ef0b5]">
@@ -348,10 +413,10 @@ function RankingsPageContent() {
                     placeholder="např. Series One, Ultimate, O-Pee-Chee..."
                     className="mt-1.5 w-full rounded-xl border border-slate-800 bg-slate-950/80 px-3.5 py-2 text-sm text-white placeholder-slate-600 outline-none transition focus:border-[#18C964]"
                   />
-                  {products.length > 0 && (
+                  {sportProducts.length > 0 && (
                     <div className="mt-1.5 flex flex-wrap gap-1 text-[11px] text-slate-500">
                       <span>Rychlý výběr:</span>
-                      {products.slice(0, 4).map((p) => (
+                      {sportProducts.slice(0, 4).map((p) => (
                         <button
                           key={p.id}
                           type="button"
@@ -392,7 +457,7 @@ function RankingsPageContent() {
                       className="w-full rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-xs text-white outline-none focus:border-[#18C964]"
                     >
                       <option value="">Vyberte žebříček pro zkopírování...</option>
-                      {rankings
+                      {sportRankings
                         .filter((r) => r.id !== editingId)
                         .map((r) => (
                           <option key={r.id} value={r.id}>
@@ -455,7 +520,7 @@ function RankingsPageContent() {
                 {currentTeamOrder.map((teamId, index) => {
                   const team = teamLookup.get(teamId);
                   const isTopTier = index < 3;
-                  const isBottomTier = index >= 28;
+                  const isBottomTier = index >= currentTeamOrder.length - 4;
                   const isDraggingThis = draggedIndex === index;
                   const isDragTarget = dragOverIndex === index;
 
@@ -525,13 +590,8 @@ function RankingsPageContent() {
                         </span>
 
                         {/* Team Logo */}
-                        {team?.logo ? (
-                          <img
-                            src={team.logo}
-                            alt={team.name}
-                            className="h-7 w-7 shrink-0 object-contain drop-shadow"
-                            loading="lazy"
-                          />
+                        {team ? (
+                          <TeamLogo team={team} className="h-7 w-7 shrink-0 object-contain drop-shadow text-[8px]" />
                         ) : null}
 
                         {/* Team Name */}
@@ -593,11 +653,12 @@ function RankingsPageContent() {
                   {isSaving ? "Ukládám…" : "Uložit žebříček"}
                 </button>
               </div>
-            </Card>
+              </Card>
+            </div>
           ) : null}
 
           {/* BOXES / PRODUCTS COVERAGE OVERVIEW */}
-          {!isEditing && productsWithRankingStatus.length > 0 && (
+          {!isEditing && sportProductsWithRankingStatus.length > 0 && (
             <div className="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-5 backdrop-blur-sm sm:p-6">
               <div className="flex items-center justify-between">
                 <div>
@@ -607,7 +668,7 @@ function RankingsPageContent() {
               </div>
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {productsWithRankingStatus.map(({ product, hasRanking, ranking }) => (
+                {sportProductsWithRankingStatus.map(({ product, hasRanking, ranking }) => (
                   <div
                     key={product.id}
                     className="flex items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-950/60 p-3.5"
@@ -643,9 +704,9 @@ function RankingsPageContent() {
 
           {/* SAVED RANKINGS LIST */}
           {!isEditing && (
-            <div className="space-y-4">
+            <div id="rankings-panel" role="tabpanel" aria-labelledby={`rankings-tab-${selectedSport.toLowerCase()}`} className="space-y-4">
               <div className="flex items-center justify-between">
-                <h3 className="text-lg font-bold text-white">Uložené žebříčky ({rankings.length})</h3>
+                <h3 className="text-lg font-bold text-white">Uložené žebříčky {selectedSport} ({sportRankings.length})</h3>
                 <span className="text-xs text-slate-500">Uloženo v kolekci teamRankings</span>
               </div>
 
@@ -653,7 +714,7 @@ function RankingsPageContent() {
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/50 p-8 text-center text-sm text-slate-400">
                   Načítám žebříčky...
                 </div>
-              ) : rankings.length === 0 ? (
+              ) : sportRankings.length === 0 ? (
                 <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-950/40 p-10 text-center">
                   <p className="text-4xl">🏒</p>
                   <h4 className="mt-3 text-lg font-bold text-white">Zatím není vytvořen žádný žebříček</h4>
@@ -670,7 +731,7 @@ function RankingsPageContent() {
                 </div>
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {rankings.map((ranking) => {
+                  {sportRankings.map((ranking) => {
                     const topTeams = ranking.teamOrder
                       .slice(0, 5)
                       .map((id) => teamLookup.get(id))
@@ -708,13 +769,7 @@ function RankingsPageContent() {
                                   title={`${idx + 1}. ${team.name}`}
                                 >
                                   <span className="font-bold text-[#8ef0b5]">#{idx + 1}</span>
-                                  {team.logo ? (
-                                    <img
-                                      src={team.logo}
-                                      alt={team.name}
-                                      className="h-3.5 w-3.5 object-contain"
-                                    />
-                                  ) : null}
+                                  <TeamLogo team={team} className="h-3.5 w-3.5 shrink-0 object-contain text-[5px]" />
                                   <span className="max-w-[70px] truncate">{team.name.split(" ").pop()}</span>
                                 </div>
                               ))}

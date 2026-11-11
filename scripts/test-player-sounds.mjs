@@ -24,7 +24,7 @@ function fixture(sharedStorage = new Map()) {
   const controller = new PlayerSoundController(audio, storage, () => now);
   const turn = {
     scope: "draft:player", key: "draft-0-0", ownTurn: false, enabled: true,
-    startedAt: 0, durationSeconds: 15,
+    startedAt: 0, durationSeconds: 15, secondsLeft: 15,
   };
   return { controller, turn, tones, storage: sharedStorage,
     setNow: (value) => { now = value; }, setRunning: (value) => { running = value; } };
@@ -36,36 +36,46 @@ function fixture(sharedStorage = new Map()) {
   const next = { ...test.turn, key: "draft-1-0", ownTurn: true };
   test.controller.update(next);
   assert.deepEqual(test.tones.slice(0, 2).map((tone) => tone.at), [0, 180]);
+  test.setNow(9000);
+  test.controller.update({ ...next, secondsLeft: 6 });
+  assert.equal(test.tones.length, 2);
+  for (const second of [5, 4, 3, 2, 1]) {
+    test.setNow((15 - second) * 1000);
+    test.controller.update({ ...next, secondsLeft: second });
+    test.controller.update({ ...next, secondsLeft: second });
+  }
+  test.setNow(15_000);
+  test.controller.update({ ...next, secondsLeft: 0 });
+  assert.equal(test.tones.length, 7);
   assert.deepEqual(test.tones.slice(2).map((tone) => tone.at), [10_000, 11_000, 12_000, 13_000, 14_000]);
   assert.ok(test.tones.at(-1).frequency > test.tones.at(-2).frequency);
-  for (let second = 0; second <= 14; second++) {
-    test.setNow(second * 1000);
-    test.controller.update({ ...next });
-  }
-  assert.equal(test.tones.length, 7);
   test.setNow(15_000);
   test.controller.update(next);
   assert.ok(test.tones.every((tone) => tone.stopped));
-  console.log("✓ A new own turn plays a double signal and exactly one timestamp-aligned beep at 5/4/3/2/1");
+  console.log("✓ A new own turn beeps once at displayed 5/4/3/2/1, never at 6 or 0");
 }
 
 {
   const test = fixture();
   const own = { ...test.turn, ownTurn: true };
+  test.controller.update(test.turn);
   test.controller.update(own);
-  assert.equal(test.tones.length, 5);
+  assert.equal(test.tones.length, 2);
   test.controller.update({ ...own });
-  assert.equal(test.tones.length, 5);
+  assert.equal(test.tones.length, 2);
+  for (const second of [5, 4, 3, 2, 1]) {
+    test.controller.update({ ...own, secondsLeft: second });
+  }
+  assert.equal(test.tones.length, 7);
   test.controller.stop();
   const reload = fixture(test.storage);
   reload.controller.update(own);
-  assert.equal(reload.tones.length, 5);
-  assert.ok(reload.tones.every((tone) => tone.at >= 10_000));
+  assert.equal(reload.tones.length, 0);
   const delayedTimestamp = fixture();
   delayedTimestamp.controller.update({ ...own, startedAt: null });
-  delayedTimestamp.controller.update(own);
-  assert.equal(delayedTimestamp.tones.length, 5);
-  console.log("✓ F5, repeated snapshots and delayed initial timestamps never repeat the turn-start signal");
+  delayedTimestamp.controller.update({ ...own, secondsLeft: 3 });
+  assert.equal(delayedTimestamp.tones.length, 1);
+  console.log("✓ Repeated snapshots do not duplicate countdown signals; late timestamps ring only the displayed second");
 }
 
 {
@@ -74,31 +84,50 @@ function fixture(sharedStorage = new Map()) {
   test.controller.update({ ...test.turn, key: "other-turn" });
   assert.equal(test.tones.length, 0);
   test.setRunning(false);
-  const own = { ...test.turn, key: "own", ownTurn: true };
+  const own = { ...test.turn, key: "own", ownTurn: true, secondsLeft: 3 };
   test.controller.update(own);
   assert.equal(test.tones.length, 0);
-  test.setNow(11_500);
   test.setRunning(true);
   test.controller.update(own);
-  assert.deepEqual(test.tones.map((tone) => tone.at), [12_000, 13_000, 14_000]);
+  assert.deepEqual(test.tones.map((tone) => tone.at), [0]);
+  assert.equal(test.tones.length, 1);
+  console.log("✓ Other players/viewers stay silent; activation beeps only for the currently displayed second");
+}
+
+{
+  const test = fixture();
+  test.controller.update(test.turn);
+  const lateOwnTurn = { ...test.turn, key: "late-own-turn", ownTurn: true, secondsLeft: 6 };
+  test.controller.update(lateOwnTurn);
+  assert.equal(test.tones.length, 0);
+  test.controller.update({ ...lateOwnTurn, secondsLeft: 5 });
+  assert.equal(test.tones.length, 1);
+  test.controller.stop();
+  test.controller.update({ ...lateOwnTurn, ownTurn: false, key: "after-manual-pick" });
+  const nextOwnTurn = { ...lateOwnTurn, key: "after-auto-pick", secondsLeft: 15 };
+  test.controller.update(nextOwnTurn);
   assert.equal(test.tones.length, 3);
-  console.log("✓ Other players/viewers stay silent; late activation does not replay missed seconds or the start signal");
+  test.controller.update({ ...nextOwnTurn, secondsLeft: 6 });
+  assert.equal(test.tones.length, 3);
+  test.controller.update({ ...nextOwnTurn, secondsLeft: 5 });
+  assert.equal(test.tones.length, 4);
+  console.log("✓ Late/manual/automatic turn changes never sound at 6, and the next own turn starts a fresh count");
 }
 
 {
   const test = fixture();
   const own = { ...test.turn, ownTurn: true };
   test.controller.update(own);
-  test.setNow(11_200);
+  test.controller.update({ ...own, secondsLeft: 5 });
   test.controller.update({ ...own, enabled: false });
   assert.ok(test.tones.every((tone) => tone.stopped));
-  test.controller.update({ ...own });
-  assert.deepEqual(test.tones.slice(5).map((tone) => tone.at), [12_000, 13_000, 14_000]);
-  test.controller.update({ ...own });
-  assert.equal(test.tones.length, 8);
+  test.controller.update({ ...own, secondsLeft: 4 });
+  test.controller.update({ ...own, secondsLeft: 4 });
+  for (const second of [3, 2, 1]) test.controller.update({ ...own, secondsLeft: second });
+  assert.equal(test.tones.length, 5);
   test.controller.stop();
   assert.ok(test.tones.every((tone) => tone.stopped));
-  console.log("✓ Muting cancels audio immediately; unmuting schedules only future seconds, without duplicates");
+  console.log("✓ Muting cancels audio immediately; unmuting plays only future displayed seconds, without duplicates");
 }
 
 {
@@ -109,8 +138,8 @@ function fixture(sharedStorage = new Map()) {
   assert.ok(test.tones.every((tone) => tone.stopped));
   const noLimit = { ...test.turn, key: "unlimited", ownTurn: true, durationSeconds: null };
   test.controller.update(noLimit);
-  assert.equal(test.tones.length, 7);
-  assert.deepEqual(test.tones.slice(5).map((tone) => tone.at), [2000, 2180]);
+  assert.equal(test.tones.length, 2);
+  assert.deepEqual(test.tones.map((tone) => tone.at), [2000, 2180]);
   test.controller.update({ ...noLimit, ownTurn: false });
   assert.ok(test.tones.every((tone) => tone.stopped));
   console.log("✓ Turn end, pause, completion and manual stop cancel all tones; untimed turns have no countdown");
@@ -131,15 +160,15 @@ function fixture(sharedStorage = new Map()) {
   test.controller.update(lobby);
   const started = { ...test.turn, ownTurn: true };
   test.controller.update(started);
-  assert.equal(test.tones.length, 7);
+  assert.equal(test.tones.length, 2);
   test.setNow(11_200);
   test.controller.update({ ...started, ownTurn: false });
   test.controller.update({ ...started, startedAt: 2000 });
   assert.equal(test.tones.filter((tone) => tone.frequency === 660 || tone.frequency === 880).length, 2);
-  assert.deepEqual(test.tones.slice(7).map((tone) => tone.at), [14_000, 15_000, 16_000]);
+  assert.equal(test.tones.length, 2);
   test.controller.update({ ...started, startedAt: 2000 });
-  assert.equal(test.tones.length, 10);
-  console.log("✓ The first turn after waiting is announced; resuming/correcting its clock never repeats the start or elapsed seconds");
+  assert.equal(test.tones.length, 2);
+  console.log("✓ The first turn after waiting is announced; clock corrections never replay countdown beeps");
 }
 
 const require = createRequire(import.meta.url);
@@ -242,7 +271,7 @@ runInNewContext(compiled, {
   },
 });
 let enabled = true;
-let currentTurn = { scope: "draft:player", key: "initial", ownTurn: false, startedAt: 0, durationSeconds: 15 };
+let currentTurn = { scope: "draft:player", key: "initial", ownTurn: false, startedAt: 0, durationSeconds: 15, secondsLeft: 15 };
 const setEnabled = (value) => { enabled = value; };
 function renderHook() {
   cursor = 0;
@@ -263,8 +292,14 @@ assert.equal(contexts.length, 1);
 assert.equal(sounds.ready, true);
 currentTurn = { ...currentTurn, key: "next", ownTurn: true };
 sounds = renderHook();
+assert.equal(contexts[0].oscillators.length, 2);
+for (const secondsLeft of [6, 5, 4, 3, 2, 1, 0]) {
+  currentTurn = { ...currentTurn, secondsLeft };
+  sounds = renderHook();
+}
 assert.equal(contexts[0].oscillators.length, 7);
-assert.deepEqual(contexts[0].oscillators.map((tone) => tone.startAt), [0, 0.18, 10, 11, 12, 13, 14]);
+assert.deepEqual(contexts[0].oscillators.slice(0, 2).map((tone) => tone.startAt), [0, 0.18]);
+assert.deepEqual(contexts[0].oscillators.slice(2).map((tone) => tone.frequencyValue), [780, 780, 780, 780, 1040]);
 assert.ok(contexts[0].gains.every((gain) => gain.events.some((event) => event[0] === "ramp")));
 renderHook();
 assert.equal(contexts[0].oscillators.length, 7);
@@ -280,7 +315,7 @@ await flush();
 sounds = renderHook();
 assert.equal(enabled, true);
 assert.equal(stored.get("dm-draft-sound-enabled"), "true");
-assert.equal(contexts[0].oscillators.length, 10);
+assert.equal(contexts[0].oscillators.length, 7);
 storageFails = true;
 sounds.toggle();
 sounds = renderHook();
@@ -293,7 +328,7 @@ sounds = renderHook();
 const beforeSuspension = contexts[0].oscillators.length;
 contexts[0].state = "suspended";
 contexts[0].onstatechange();
-assert.ok(contexts[0].oscillators.every((oscillator) => oscillator.stops >= 2));
+assert.ok(contexts[0].oscillators.every((oscillator) => oscillator.stops >= 1));
 wallTime = 12_500;
 sounds = renderHook();
 assert.equal(sounds.ready, false);
@@ -301,17 +336,17 @@ listeners.get("keydown")();
 await flush();
 sounds = renderHook();
 assert.equal(sounds.ready, true);
-assert.equal(contexts[0].oscillators.length, beforeSuspension + 2);
-assert.deepEqual(contexts[0].oscillators.slice(beforeSuspension).map((tone) => tone.frequencyValue), [780, 1040]);
+assert.equal(contexts[0].oscillators.length, beforeSuspension);
 assert.equal(timeouts.size, 1);
 const expiry = [...timeouts.values()][0];
 assert.equal(expiry.at, 15_000);
 wallTime = 15_000;
 expiry.callback();
 assert.ok(contexts[0].oscillators.every((oscillator) => oscillator.stops >= 2));
+const afterExpiryOscillators = contexts[0].oscillators.length;
 currentTurn = { ...currentTurn, key: "after-expiry", startedAt: 15_000 };
 sounds = renderHook();
-assert.ok(contexts[0].oscillators.some((oscillator) => oscillator.stops === 1));
+assert.equal(contexts[0].oscillators.length, afterExpiryOscillators);
 sounds.stop();
 assert.ok(contexts[0].oscillators.every((oscillator) => oscillator.stops >= 2));
 currentTurn = { ...currentTurn, ownTurn: false };

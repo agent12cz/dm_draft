@@ -17,7 +17,8 @@ import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
 import { PickAnnouncement } from "@/components/PickAnnouncement";
 import { PickHistoryTracker, type PickAnnouncement as PickEvent } from "@/lib/pickAnnouncements";
-import { getNhlTeamNameLines } from "@/lib/nhlTeamNames";
+import { getTeamNameLines } from "@/lib/nhlTeamNames";
+import { TeamLogo as SharedTeamLogo } from "@/components/TeamLogo";
 
 type DraftParticipant = {
   id: string;
@@ -121,31 +122,9 @@ function TeamLogo({
   width?: number;
   height?: number;
 }) {
-  const teamName = item?.name ?? "";
-  const slug = teamName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-  const logoSrc = item?.logo || (slug ? `/logos/nhl/${slug}.png` : "");
-
-  if (!teamName || !logoSrc) {
-    return (
-      <div className={`flex items-center justify-center rounded-lg bg-slate-800 text-[10px] font-bold text-slate-300 ${className}`}>
-        {teamName ? teamName.slice(0, 3).toUpperCase() : "—"}
-      </div>
-    );
-  }
-
-  return (
-    <img
-      src={logoSrc}
-      alt={teamName}
-      width={width ?? 32}
-      height={height ?? 32}
-      className={`${className} object-contain`}
-      loading="lazy"
-    />
-  );
+  return item
+    ? <SharedTeamLogo team={item} width={width} height={height} className={`${className} object-contain`} />
+    : null;
 }
 
 function resolveHistoryItem(draftItems: DraftItem[], itemId?: string, itemName?: string) {
@@ -299,7 +278,10 @@ export default function PlayerDraftPage() {
               participantCount: Number(data.participantCount ?? 0),
               currentPickIndex: Number(data.currentPickIndex ?? 0),
               pickOrder: (data.pickOrder ?? []) as number[],
-              draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+              draftItems: (Array.isArray(data.draftItems) && data.draftItems.length > 0
+                ? data.draftItems as Array<DraftItem | string>
+                : defaultDraftItems
+              ).map((item) => normalizeDraftItem(item)),
               availableItemIds: (data.availableItemIds ?? []) as string[],
               history: (data.history ?? []) as DraftHistoryItem[],
               turnDurationSeconds: data.turnDurationSeconds === null ? null : Number(data.turnDurationSeconds ?? 15),
@@ -594,6 +576,7 @@ export default function PlayerDraftPage() {
       enabled: soundEnabled,
       startedAt: turnStartedAtMs,
       durationSeconds: draft.turnDurationSeconds,
+      secondsLeft: timeLeft,
     } : null,
     setSoundEnabled,
   );
@@ -696,7 +679,7 @@ export default function PlayerDraftPage() {
   const draftRankingOrder = useMemo(() => {
     if (!draft) return defaultDraftItems.map((item) => item.id);
     if (draft.teamRanking && draft.teamRanking.length > 0) {
-      return ensureAllTeamsInOrder(draft.teamRanking);
+      return ensureAllTeamsInOrder(draft.teamRanking, draft.draftItems);
     }
     return draft.draftItems.map((item) => item.id);
   }, [draft]);
@@ -747,10 +730,10 @@ export default function PlayerDraftPage() {
     if (!initialOrder) {
       initialOrder = draft.teamRanking && draft.teamRanking.length > 0
         ? draft.teamRanking
-        : defaultDraftItems.map((item) => item.id);
+        : draft.draftItems.map((item) => item.id);
     }
 
-    const valid = ensureAllTeamsInOrder(initialOrder);
+    const valid = ensureAllTeamsInOrder(initialOrder, draft.draftItems);
     setMyPrioritiesOrder(valid);
     setSavedPrioritiesOrder(valid);
   }, [draft, user, currentUserParticipant]);
@@ -809,7 +792,7 @@ export default function PlayerDraftPage() {
 
   async function handleSavePriorities(orderToSave?: string[]) {
     if (!draft || !user) return;
-    const order = ensureAllTeamsInOrder(orderToSave ?? myPrioritiesOrder);
+    const order = ensureAllTeamsInOrder(orderToSave ?? myPrioritiesOrder, draft.draftItems);
     setIsSavingPriorities(true);
     setPrioritiesFeedback(null);
 
@@ -1479,7 +1462,7 @@ export default function PlayerDraftPage() {
                                   : "bg-slate-800 text-slate-300"
                               }`}
                             >
-                              32
+                              {draft.draftItems.length}
                             </span>
                           )}
                         </button>
@@ -1504,7 +1487,7 @@ export default function PlayerDraftPage() {
                                 : "bg-slate-800 text-slate-300"
                             }`}
                           >
-                            32
+                            {draft.draftItems.length}
                           </span>
                         </button>
                       </div>
@@ -1592,7 +1575,7 @@ export default function PlayerDraftPage() {
                                   </div>
 
                                   <p className="mt-2.5 min-h-[2.5em] w-full min-w-0 text-xs font-bold leading-tight text-white transition group-hover:text-[#8ef0b5] sm:text-sm">
-                                    {getNhlTeamNameLines(item).map((line, index) => (
+                                    {getTeamNameLines(item).map((line, index) => (
                                       <span key={index} className="block truncate" title={line}>{line}</span>
                                     ))}
                                   </p>

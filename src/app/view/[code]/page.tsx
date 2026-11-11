@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { getFirebaseClient } from "@/lib/firebase";
-import { normalizeDraftItem } from "@/lib/snakeDraft";
+import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
+import { TeamLogo as SharedTeamLogo } from "@/components/TeamLogo";
 
 type DraftParticipant = {
   id: string;
@@ -52,18 +53,7 @@ type Draft = {
 };
 
 function TeamLogo({ item, className = "h-8 w-8" }: { item?: DraftItem | null; className?: string }) {
-  const teamName = item?.name ?? "";
-  const slug = teamName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-  const logoSrc = slug ? `/logos/nhl/${slug}.png` : "";
-
-  if (!teamName || !logoSrc) {
-    return null;
-  }
-
-  return <img src={logoSrc} alt={teamName} width={32} height={32} className={className} />;
+  return item ? <SharedTeamLogo team={item} width={32} height={32} className={className} /> : null;
 }
 
 export default function ViewerPage() {
@@ -112,7 +102,10 @@ export default function ViewerPage() {
                 participants: (data.participants ?? []) as DraftParticipant[],
                 currentPickIndex: Number(data.currentPickIndex ?? 0),
                 pickOrder: (data.pickOrder ?? []) as number[],
-                draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+                draftItems: (Array.isArray(data.draftItems) && data.draftItems.length > 0
+                  ? data.draftItems as Array<DraftItem | string>
+                  : defaultDraftItems
+                ).map((item) => normalizeDraftItem(item)),
                 availableItemIds: (data.availableItemIds ?? []) as string[],
                 history: (data.history ?? []) as DraftHistoryItem[],
               };

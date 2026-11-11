@@ -11,6 +11,7 @@ import {
   extendSnakeOrderForSkippedPick,
 } from "../src/lib/snakeDraft.js";
 import { calculateCombinedTeamRanking } from "../src/lib/rankings.js";
+import { getTeamsForSport } from "../src/lib/sportsTeams.js";
 import { getTimeLeftForTurn, getTurnKey } from "../src/lib/turnCountdown.ts";
 
 const teams = [
@@ -151,6 +152,40 @@ function draftFixture(overrides = {}) {
     15,
   );
   console.log("✓ Drafts with 14, 30 and 32 teams keep snake order and finish on the actual last team");
+}
+
+{
+  for (const sport of ["NHL", "NBA", "NFL", "MLB"]) {
+    const items = getTeamsForSport(sport);
+    const participantCount = 4;
+    const pickOrder = buildSnakeOrder(participantCount, items.length);
+    let draft = draftFixture({
+      participants: Array.from({ length: participantCount }, (_, index) => ({
+        userId: `player-${index + 1}`,
+        name: `Player ${index + 1}`,
+        picks: [],
+      })),
+      pickOrder,
+      currentPickIndex: 0,
+      availableItemIds: items.map((item) => item.id),
+      draftItems: items,
+      teamRanking: items.map((item) => item.id).reverse(),
+      history: [],
+      playerPriorities: {},
+    });
+
+    for (let index = 0; index < items.length; index += 1) {
+      const update = buildAutomaticPickUpdate(draft);
+      assert.ok(update, `${sport} pick ${index + 1} should be available`);
+      assert.equal(update.status, index === items.length - 1 ? "completed" : "drafting");
+      draft = { ...draft, ...update };
+    }
+
+    assert.equal(draft.availableItemIds.length, 0);
+    assert.equal(draft.history.length, items.length);
+    assert.equal(new Set(draft.history.map((entry) => entry.itemId)).size, items.length);
+    console.log(`✓ ${sport} autopick completes with ${items.length} distinct teams`);
+  }
 }
 
 {

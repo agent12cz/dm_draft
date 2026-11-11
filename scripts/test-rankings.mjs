@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { defaultDraftItems } from "../src/lib/snakeDraft.js";
 import {
   createProductKey,
+  createSportRankingKey,
   ensureAllTeamsInOrder,
   calculateCombinedTeamRanking,
+  filterRankingsBySport,
 } from "../src/lib/rankings.js";
+import { getTeamsForSport } from "../src/lib/sportsTeams.js";
 
 console.log("Running rankings logic unit tests...");
 
@@ -15,6 +19,59 @@ console.log("Running rankings logic unit tests...");
   assert.equal(createProductKey("O-Pee-Chee", "2024-25"), "o-pee-chee__2024-25");
   assert.equal(createProductKey("  SP Game Used  ", "  2023/24  "), "sp-game-used__2023-24");
   console.log("✓ Test 1: createProductKey passed");
+}
+
+{
+  assert.equal(createSportRankingKey("NHL", "Series One", "2026/27"), "series-one__2026-27");
+  assert.equal(createSportRankingKey("NBA", "Series One", "2026/27"), "nba__series-one__2026-27");
+  assert.equal(createSportRankingKey("NFL", "Series One", "2026/27"), "nfl__series-one__2026-27");
+  assert.equal(createSportRankingKey("MLB", "Series One", "2026/27"), "mlb__series-one__2026-27");
+
+  const rankings = [
+    { id: "series-one__2026-27", sport: undefined, teamOrder: ["legacy-nhl"] },
+    { id: "nba__series-one__2026-27", sport: "NBA", teamOrder: ["nba-atlanta-hawks"] },
+  ];
+  assert.deepEqual(filterRankingsBySport(rankings, "NHL").map((ranking) => ranking.id), ["series-one__2026-27"]);
+  assert.deepEqual(filterRankingsBySport(rankings, "NBA").map((ranking) => ranking.id), ["nba__series-one__2026-27"]);
+  assert.equal(getTeamsForSport("NHL").length, 32);
+  assert.deepEqual(
+    getTeamsForSport("NHL").map((team) => team.id),
+    defaultDraftItems.map((team) => team.id),
+  );
+  assert.equal(getTeamsForSport("NBA").length, 30);
+  assert.equal(getTeamsForSport("NFL").length, 32);
+  assert.equal(getTeamsForSport("MLB").length, 30);
+  const teamCatalogs = Object.fromEntries(
+    ["NBA", "NFL", "MLB"].map((sport) => [sport, getTeamsForSport(sport)]),
+  );
+  const additionalTeams = Object.values(teamCatalogs).flat();
+  const teamIds = additionalTeams
+    .map((team) => team.id);
+  assert.equal(new Set(teamIds).size, teamIds.length);
+  const logoPaths = additionalTeams.map((team) => team.logo);
+  assert.equal(new Set(logoPaths).size, logoPaths.length);
+  for (const team of additionalTeams) {
+    assert.match(team.id, new RegExp(`^${team.sport.toLowerCase()}-`));
+    assert.match(team.logo, new RegExp(`^/logos/${team.sport.toLowerCase()}/[A-Z]{2,3}\\.png$`));
+    assert.equal(team.logo.split("/").pop(), `${team.abbreviation}.png`);
+  }
+
+  const logoManifest = readFileSync(new URL("../LOGOS.md", import.meta.url), "utf8");
+  for (const [sport, teams] of Object.entries(teamCatalogs)) {
+    const section = logoManifest.split(`## ${sport}\n`)[1]?.split("\n## ")[0];
+    assert.ok(section, `Missing ${sport} section in LOGOS.md`);
+    const rows = [...section.matchAll(/^\| ([^|]+) \| ([A-Z]{2,3}) \| `([^`]+)` \|$/gm)];
+    assert.equal(rows.length, teams.length, `${sport} manifest count`);
+    assert.deepEqual(
+      rows.map(([, name, abbreviation, filename]) => ({ name, abbreviation, filename })),
+      teams.map((team) => ({
+        name: team.name,
+        abbreviation: team.abbreviation,
+        filename: `${team.abbreviation}.png`,
+      })),
+    );
+  }
+  console.log("✓ Sport ranking keys, legacy NHL fallback and independent team catalogs");
 }
 
 // Test 2: ensureAllTeamsInOrder
@@ -61,6 +118,36 @@ console.log("Running rankings logic unit tests...");
     );
   }
   console.log("✓ Team order validation and weighted rankings support 14, 30 and 32 teams");
+}
+
+{
+  for (const sport of ["NBA", "NFL", "MLB"]) {
+    const teams = getTeamsForSport(sport);
+    const reversedOrder = teams.map((team) => team.id).reverse();
+    const ranking = calculateCombinedTeamRanking(
+      [{
+        sport,
+        productName: "League Box",
+        productSeason: "2026",
+        boxCount: 1,
+        boxPrice: 1,
+      }],
+      teams,
+      { [createSportRankingKey(sport, "League Box", "2026")]: reversedOrder },
+    );
+    assert.equal(ranking.length, teams.length);
+    assert.equal(ranking[0].teamId, reversedOrder[0]);
+    assert.equal(ranking.at(-1).teamId, reversedOrder.at(-1));
+  }
+
+  const legacyNhlOrder = [...defaultDraftItems].reverse().map((team) => team.id);
+  const legacyNhlRanking = calculateCombinedTeamRanking(
+    [{ productName: "Legacy Box", productSeason: "2025", boxCount: 1, boxPrice: 1 }],
+    defaultDraftItems,
+    { [createProductKey("Legacy Box", "2025")]: legacyNhlOrder },
+  );
+  assert.equal(legacyNhlRanking[0].teamId, legacyNhlOrder[0]);
+  console.log("✓ Weighted rankings use independent sport keys while retaining legacy NHL keys");
 }
 
 // Test 3: User's exact prompt example
