@@ -1,19 +1,24 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { getFirebaseClient } from "@/lib/firebase";
-import { buildSnakeOrder, defaultDraftItems, type DraftItem } from "@/lib/snakeDraft";
+import { createDraftWithUniqueCode } from "@/lib/createDraft";
+import { buildSnakeOrder, type DraftItem } from "@/lib/snakeDraft";
 import {
   calculateCombinedTeamRanking,
   createProductKey,
+  createSportRankingKey,
   ensureAllTeamsInOrder,
   type CalculatedTeamRank,
 } from "@/lib/rankings";
+import { getProductSport, productSports, type ProductSport } from "@/lib/products";
+import { getTeamsForSport } from "@/lib/sportsTeams";
+import { TeamLogo } from "@/components/TeamLogo";
 import AuthGuard from "@/app/auth-guard";
 import { useAuth } from "@/components/AuthProvider";
 
@@ -25,6 +30,7 @@ type Product = {
   currency: "CZK";
   active: boolean;
   imageUrl?: string;
+  sport: ProductSport;
 };
 
 type BoxSelectionItem = {
@@ -39,7 +45,7 @@ type BoxSelectionItem = {
 
 type DraftFormValues = {
   draftName: string;
-  sport: string;
+  sport: ProductSport;
   margin: number;
   participantCount: number;
   participantNames: string;
@@ -61,6 +67,7 @@ function NewDraftPageContent() {
   const router = useRouter();
   const { user } = useAuth();
   const [formValues, setFormValues] = useState<DraftFormValues>(initialValues);
+  const selectedSportRef = useRef<ProductSport>(initialValues.sport);
   const [products, setProducts] = useState<Product[]>([]);
   const [rankingsMap, setRankingsMap] = useState<Record<string, string[]>>({});
   const [selectedBoxes, setSelectedBoxes] = useState<BoxSelectionItem[]>([]);
@@ -75,6 +82,21 @@ function NewDraftPageContent() {
   const [draggedRankIndex, setDraggedRankIndex] = useState<number | null>(null);
   const [dragOverRankIndex, setDragOverRankIndex] = useState<number | null>(null);
 
+  const sport = formValues.sport;
+  const sportTeams = useMemo(() => getTeamsForSport(sport), [sport]);
+  const sportProducts = useMemo(
+    () => products.filter((product) => product.sport === sport),
+    [products, sport],
+  );
+  const selectedProductsHaveRankings = useMemo(
+    () => selectedBoxes.every((box) => {
+      const sportKey = createSportRankingKey(sport, box.productName, box.productSeason);
+      const legacyNhlKey = createProductKey(box.productName, box.productSeason);
+      return Boolean(rankingsMap[sportKey] ?? (sport === "NHL" ? rankingsMap[legacyNhlKey] : undefined));
+    }),
+    [rankingsMap, selectedBoxes, sport],
+  );
+
   useEffect(() => {
     let isMounted = true;
 
@@ -88,20 +110,30 @@ function NewDraftPageContent() {
         // Load active products
         const productsSnapshot = await firestoreApi.getDocs(firestoreApi.collection(db, "products"));
         const activeProducts = productsSnapshot.docs
-          .map((document) => ({
-            id: document.id,
-            ...(document.data() as Omit<Product, "id">),
-          }))
-          .filter((product) => product.active) as Product[];
+          .map((document) => {
+            const data = document.data();
+            const sport = getProductSport(data.sport);
+            if (!sport) return null;
+            return {
+              id: document.id,
+              ...(data as Omit<Product, "id" | "sport">),
+              sport,
+            } as Product;
+          })
+          .filter((product): product is Product => Boolean(product?.active));
 
         // Load saved team rankings
         const rankingsSnapshot = await firestoreApi.getDocs(firestoreApi.collection(db, "teamRankings"));
         const map: Record<string, string[]> = {};
         for (const doc of rankingsSnapshot.docs) {
           const data = doc.data();
+          const sport = getProductSport(data.sport);
+          if (!sport) continue;
           const key = (data.productKey as string) || doc.id;
           if (Array.isArray(data.teamOrder)) {
-            map[key] = ensureAllTeamsInOrder(data.teamOrder as string[]);
+            const teams = getTeamsForSport(sport);
+            map[key] = ensureAllTeamsInOrder(data.teamOrder as string[], teams);
+            map[doc.id] = map[key];
           }
         }
 
@@ -110,10 +142,11 @@ function NewDraftPageContent() {
         setProducts(activeProducts);
         setRankingsMap(map);
 
-        if (activeProducts.length > 0 && selectedBoxes.length === 0) {
-          const first = activeProducts[0];
-          setSelectedBoxes([
-            {
+        const selectedSportProducts = activeProducts.filter((product) => product.sport === selectedSportRef.current);
+        setSelectedBoxes((current) => {
+          if (current.length > 0 || selectedSportProducts.length === 0) return current;
+          const first = selectedSportProducts[0];
+          return [{
               tempId: "box-1",
               productId: first.id,
               productName: first.name,
@@ -121,9 +154,8 @@ function NewDraftPageContent() {
               boxCount: 1,
               boxPrice: first.defaultPrice,
               productImageUrl: first.imageUrl ?? "",
-            },
-          ]);
-        }
+            }];
+        });
       } catch (loadError) {
         console.error(loadError);
         if (isMounted) {
@@ -166,31 +198,32 @@ function NewDraftPageContent() {
   const calculatedRankingList = useMemo(() => {
     return calculateCombinedTeamRanking(
       selectedBoxes.map((b) => ({
+        sport,
         productName: b.productName,
         productSeason: b.productSeason,
         boxCount: Number(b.boxCount || 0),
         boxPrice: Number(b.boxPrice || 0),
       })),
-      defaultDraftItems,
+      sportTeams,
       rankingsMap,
     );
-  }, [selectedBoxes, rankingsMap]);
+  }, [selectedBoxes, rankingsMap, sport, sportTeams]);
 
   // Current active team order (either custom tweaked or automatic calculated)
   const activeTeamOrder = useMemo(() => {
-    if (customTeamOrder && customTeamOrder.length === defaultDraftItems.length) {
+    if (customTeamOrder && customTeamOrder.length === sportTeams.length) {
       return customTeamOrder;
     }
     return calculatedRankingList.map((r) => r.teamId);
-  }, [customTeamOrder, calculatedRankingList]);
+  }, [customTeamOrder, calculatedRankingList, sportTeams.length]);
 
   const teamLookup = useMemo(() => {
     const map = new Map<string, DraftItem>();
-    for (const team of defaultDraftItems) {
+    for (const team of sportTeams) {
       map.set(team.id, team);
     }
     return map;
-  }, []);
+  }, [sportTeams]);
 
   const calculatedScoreMap = useMemo(() => {
     const map = new Map<string, CalculatedTeamRank>();
@@ -201,15 +234,16 @@ function NewDraftPageContent() {
   }, [calculatedRankingList]);
 
   function handleAddBox() {
-    const firstProduct = products[0];
+    const firstProduct = sportProducts[0];
+    if (!firstProduct) return;
     const newBox: BoxSelectionItem = {
       tempId: `box-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      productId: firstProduct?.id ?? "",
-      productName: firstProduct?.name ?? "Vlastní box",
-      productSeason: firstProduct?.season ?? "2026/27",
+      productId: firstProduct.id,
+      productName: firstProduct.name,
+      productSeason: firstProduct.season,
       boxCount: 1,
-      boxPrice: firstProduct?.defaultPrice ?? 0,
-      productImageUrl: firstProduct?.imageUrl ?? "",
+      boxPrice: firstProduct.defaultPrice,
+      productImageUrl: firstProduct.imageUrl ?? "",
     };
     setSelectedBoxes((current) => [...current, newBox]);
     setCustomTeamOrder(null);
@@ -290,12 +324,12 @@ function NewDraftPageContent() {
     }
 
     const trimmedTitle = formValues.draftName.trim();
-    const trimmedSport = formValues.sport.trim();
+    const selectedSport = formValues.sport;
     const margin = Number(formValues.margin);
     const participantCount = Number(formValues.participantCount);
     const customTurnDurationSeconds = Number(formValues.customTurnDurationSeconds);
 
-    if (!trimmedTitle || !trimmedSport) {
+    if (!trimmedTitle) {
       setError("Vyplňte název draftu a sport.");
       setIsSubmitting(false);
       return;
@@ -303,6 +337,12 @@ function NewDraftPageContent() {
 
     if (selectedBoxes.length === 0) {
       setError("Přidejte do draftu alespoň jeden box.");
+      setIsSubmitting(false);
+      return;
+    }
+
+    if (selectedBoxes.some((box) => !sportProducts.some((product) => product.id === box.productId))) {
+      setError("Vybrané boxy neodpovídají zvolenému sportu. Zkontrolujte výběr boxů.");
       setIsSubmitting(false);
       return;
     }
@@ -342,7 +382,6 @@ function NewDraftPageContent() {
 
     try {
       const { db, firestoreApi } = await getFirebaseClient();
-      const draftCode = generateDraftCode();
 
       const reservedParticipantNames = formValues.participantNames
         .split(/\r?\n/)
@@ -351,6 +390,7 @@ function NewDraftPageContent() {
 
       // Prepare boxes payload
       const boxesPayload = selectedBoxes.map((box) => ({
+        sport: selectedSport,
         productId: box.productId,
         productName: box.productName,
         productSeason: box.productSeason,
@@ -372,12 +412,12 @@ function NewDraftPageContent() {
       const avgBoxPrice = totalBoxCount > 0 ? Math.round(totalBoxesCost / totalBoxCount) : 0;
 
       // Final team ranking order
-      const finalTeamRanking = ensureAllTeamsInOrder(activeTeamOrder);
+      const finalTeamRanking = ensureAllTeamsInOrder(activeTeamOrder, sportTeams);
 
       const draftData = {
         ownerUserId: user.uid,
         title: trimmedTitle,
-        sport: trimmedSport,
+        sport: selectedSport,
         // Boxes and Rankings extensions
         boxes: boxesPayload,
         teamRanking: finalTeamRanking,
@@ -410,17 +450,16 @@ function NewDraftPageContent() {
         }),
         status: "waiting",
         currentPickIndex: 0,
-        pickOrder: buildSnakeOrder(participantCount, defaultDraftItems.length),
-        draftItems: defaultDraftItems,
-        availableItemIds: defaultDraftItems.map((item) => item.id),
+        pickOrder: buildSnakeOrder(participantCount, sportTeams.length),
+        draftItems: sportTeams,
+        availableItemIds: sportTeams.map((item) => item.id),
         history: [],
         turnDurationSeconds,
         createdAt: firestoreApi.serverTimestamp(),
         updatedAt: firestoreApi.serverTimestamp(),
-        code: draftCode,
       };
 
-      await firestoreApi.setDoc(firestoreApi.doc(db, "drafts", draftCode), draftData);
+      const draftCode = await createDraftWithUniqueCode(db, firestoreApi, generateDraftCode, draftData);
       router.push(`/draft/${draftCode}`);
     } catch (createError) {
       console.error(createError);
@@ -431,6 +470,24 @@ function NewDraftPageContent() {
   }
 
   function handleChange(field: keyof DraftFormValues, value: string | number) {
+    if (field === "sport") {
+      const nextSport = value as ProductSport;
+      const firstProduct = products.find((product) => product.sport === nextSport);
+      selectedSportRef.current = nextSport;
+      setFormValues((current) => ({ ...current, sport: nextSport }));
+      setSelectedBoxes(firstProduct ? [{
+        tempId: `box-${Date.now()}`,
+        productId: firstProduct.id,
+        productName: firstProduct.name,
+        productSeason: firstProduct.season,
+        boxCount: 1,
+        boxPrice: firstProduct.defaultPrice,
+        productImageUrl: firstProduct.imageUrl ?? "",
+      }] : []);
+      setCustomTeamOrder(null);
+      setError(null);
+      return;
+    }
     setFormValues((current) => ({ ...current, [field]: value }));
   }
 
@@ -456,7 +513,7 @@ function NewDraftPageContent() {
                 Vytvořit nový snake draft
               </h1>
               <p className="text-base text-slate-400">
-                Nastavte parametry draftu a zvolte kombinaci boxů. Ze zvolených boxů se automaticky sestaví vážený žebříček atraktivity všech 32 týmů NHL.
+                Nastavte parametry draftu a zvolte kombinaci boxů. Ze zvolených boxů se automaticky sestaví vážený žebříček atraktivity všech {sportTeams.length} týmů {sport}.
               </p>
             </div>
 
@@ -492,7 +549,11 @@ function NewDraftPageContent() {
                     onChange={(event) => handleChange("sport", event.target.value)}
                     className="rounded-xl border border-slate-800 bg-slate-900/80 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-[#18C964]"
                   >
-                    <option value="NHL">NHL (32 týmů)</option>
+                    {productSports.map((supportedSport) => (
+                      <option key={supportedSport} value={supportedSport}>
+                        {supportedSport} ({getTeamsForSport(supportedSport).length} týmů)
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -510,6 +571,7 @@ function NewDraftPageContent() {
                   <button
                     type="button"
                     onClick={handleAddBox}
+                    disabled={sportProducts.length === 0}
                     className="rounded-xl border border-[#18C964]/40 bg-[#18C964]/10 px-3.5 py-1.5 text-xs font-bold text-[#8ef0b5] transition hover:bg-[#18C964]/20"
                   >
                     + Přidat další box
@@ -520,9 +582,23 @@ function NewDraftPageContent() {
                   <p className="text-xs text-slate-400">Načítám evidované boxy...</p>
                 ) : (
                   <div className="space-y-3">
+                    {sportProducts.length === 0 ? (
+                      <p className="rounded-xl border border-amber-500/30 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+                        Pro {sport} zatím nejsou dostupné žádné aktivní boxy. V administraci Boxů přidejte a aktivujte box této ligy.
+                      </p>
+                    ) : null}
+                    {selectedBoxes.length > 0 && !selectedProductsHaveRankings ? (
+                      <p className="rounded-xl border border-amber-500/30 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+                        Alespoň jeden z vybraných boxů nemá uložený žebříček pro {sport}. Pro tento box se použije výchozí pořadí týmů.
+                      </p>
+                    ) : null}
                     {selectedBoxes.map((box, index) => {
-                      const productKey = createProductKey(box.productName, box.productSeason);
-                      const hasSavedRanking = Boolean(rankingsMap[productKey]);
+                      const productKey = createSportRankingKey(sport, box.productName, box.productSeason);
+                      const legacyNhlKey = createProductKey(box.productName, box.productSeason);
+                      const hasSavedRanking = Boolean(
+                        rankingsMap[productKey] ??
+                        (sport === "NHL" ? rankingsMap[legacyNhlKey] : undefined),
+                      );
 
                       return (
                         <div
@@ -540,7 +616,7 @@ function NewDraftPageContent() {
                                 onChange={(e) => handleBoxProductChange(box.tempId, e.target.value)}
                                 className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white outline-none focus:border-[#18C964]"
                               >
-                                {products.map((p) => (
+                                {sportProducts.map((p) => (
                                   <option key={p.id} value={p.id}>
                                     {p.name} ({p.season})
                                   </option>
@@ -613,7 +689,7 @@ function NewDraftPageContent() {
                     <div className="flex items-center gap-2">
                       <h3 className="text-base font-bold text-white">Vypočtený žebříček atraktivity pro draft</h3>
                       <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-bold text-[#8ef0b5]">
-                        32 týmů
+                        {sportTeams.length} týmů
                       </span>
                     </div>
                     <p className="mt-1 text-xs text-slate-400">
@@ -639,7 +715,9 @@ function NewDraftPageContent() {
                       onClick={() => setIsRankingExpanded(!isRankingExpanded)}
                       className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-bold text-[#8ef0b5] hover:bg-slate-800"
                     >
-                      {isRankingExpanded ? "Skrýt všech 32 týmů ▲" : "Zobrazit a upravit všech 32 týmů ▼"}
+                      {isRankingExpanded
+                        ? `Skrýt všech ${activeTeamOrder.length} týmů ▲`
+                        : `Zobrazit a upravit všech ${activeTeamOrder.length} týmů ▼`}
                     </button>
                   </div>
                 </div>
@@ -656,7 +734,7 @@ function NewDraftPageContent() {
                         className="inline-flex items-center gap-1.5 rounded-full border border-slate-800 bg-slate-900/80 px-2.5 py-1 text-xs text-slate-200"
                       >
                         <span className="font-bold text-[#8ef0b5]">#{idx + 1}</span>
-                        {team?.logo && <img src={team.logo} alt={team.name} className="h-4 w-4 object-contain" />}
+                        {team && <TeamLogo team={team} className="h-4 w-4 object-contain" />}
                         <span className="truncate max-w-[80px]">{team?.name.split(" ").pop()}</span>
                         {calc && <span className="text-[10px] text-slate-500 font-mono">({calc.score.toFixed(1)})</span>}
                       </div>
@@ -732,7 +810,7 @@ function NewDraftPageContent() {
                               >
                                 {index + 1}
                               </span>
-                              {team?.logo && <img src={team.logo} alt={team.name} className="h-5 w-5 object-contain" />}
+                              {team && <TeamLogo team={team} className="h-5 w-5 object-contain" />}
                               <span className="truncate font-semibold text-white">{team?.name || teamId}</span>
                             </div>
 

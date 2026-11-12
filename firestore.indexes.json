@@ -1,7 +1,7 @@
 {
   "indexes": [
     {
-      "collectionGroup": "drafts",
+      "collectionGroup": "publicDrafts",
       "queryScope": "COLLECTION",
       "fields": [
         {

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
-import { getFirebaseClient } from "@/lib/firebase";
+import { getDraftPrivateAccess } from "@/lib/firestoreWorker";
 import { useAuth } from "@/components/AuthProvider";
 
 function JoinDraftPageContent() {
@@ -35,26 +35,16 @@ function JoinDraftPageContent() {
     }
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      const draftRef = await firestoreApi.getDoc(firestoreApi.doc(db, "drafts", normalizedCode));
-
-      if (!draftRef.exists()) {
-        setError("Draft s tímto kódem nebyl nalezen.");
-        return;
-      }
-
-      const draftData = draftRef.data();
-      const participants = (draftData.participants ?? []) as Array<{ userId?: string }>;
-      const isParticipant = participants.some((participant) => participant.userId === user.uid);
-
-      if (!isParticipant) {
+      const access = await getDraftPrivateAccess(normalizedCode);
+      if (!access.authorized) {
         setError("Nejste účastníkem tohoto draftu.");
         return;
       }
 
       router.replace(`/play/${normalizedCode}`);
-    } catch {
-      setError("Draft s tímto kódem nebyl nalezen.");
+    } catch (joinError) {
+      console.error(joinError);
+      setError("Draft s tímto kódem nebyl nalezen nebo k němu nemáte přístup.");
     } finally {
       setIsSubmitting(false);
     }

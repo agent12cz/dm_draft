@@ -7,12 +7,18 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { getFirebaseClient } from "@/lib/firebase";
+import { callFirestoreWorker, FirestoreWorkerError, getDraftPrivateAccess } from "@/lib/firestoreWorker";
 import { defaultDraftItems, normalizeDraftItem } from "@/lib/snakeDraft";
 import { ensureAllTeamsInOrder } from "@/lib/rankings";
 import { getTimeLeftForTurn, getTurnKey, type TurnCountdown } from "@/lib/turnCountdown";
 import { startInstantAutoPick } from "@/lib/instantAutoPick";
+import { usePlayerSounds } from "@/lib/playerSounds";
 import { useAuth } from "@/components/AuthProvider";
 import { DraftChat } from "@/components/DraftChat";
+import { PickAnnouncement } from "@/components/PickAnnouncement";
+import { PickHistoryTracker, type PickAnnouncement as PickEvent } from "@/lib/pickAnnouncements";
+import { getTeamNameLines } from "@/lib/nhlTeamNames";
+import { TeamLogo as SharedTeamLogo } from "@/components/TeamLogo";
 
 type DraftParticipant = {
   id: string;
@@ -23,6 +29,7 @@ type DraftParticipant = {
   participantPin?: string;
   participantId?: string;
   priorities?: string[];
+  status?: "waiting" | "ready" | "pending-registration";
 };
 
 type DraftHistoryItem = {
@@ -115,35 +122,10 @@ function TeamLogo({
   width?: number;
   height?: number;
 }) {
-  const teamName = item?.name ?? "";
-  const slug = teamName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-  const logoSrc = item?.logo || (slug ? `/logos/nhl/${slug}.png` : "");
-
-  if (!teamName || !logoSrc) {
-    return (
-      <div className={`flex items-center justify-center rounded-lg bg-slate-800 text-[10px] font-bold text-slate-300 ${className}`}>
-        {teamName ? teamName.slice(0, 3).toUpperCase() : "—"}
-      </div>
-    );
-  }
-
-  return (
-    <img
-      src={logoSrc}
-      alt={teamName}
-      width={width ?? 32}
-      height={height ?? 32}
-      className={`${className} object-contain`}
-      loading="lazy"
-    />
-  );
+  return item
+    ? <SharedTeamLogo team={item} width={width} height={height} className={`${className} object-contain`} />
+    : null;
 }
-
-const INVALID_PICK_MESSAGE = "Výběr už není platný. Stav draftu byl aktualizován.";
-const PICK_CONFLICT_ERROR = "PICK_CONFLICT";
 
 function resolveHistoryItem(draftItems: DraftItem[], itemId?: string, itemName?: string) {
   if (itemId) {
@@ -174,13 +156,7 @@ export default function PlayerDraftPage() {
   const [isLoading, setIsLoading] = useState(Boolean(code));
   const [error, setError] = useState<string | null>(null);
   const [isSubmittingPick, setIsSubmittingPick] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
-    if (typeof window === "undefined") {
-      return true;
-    }
-
-    return window.localStorage.getItem("dm-draft-sound-enabled") !== "false";
-  });
+  const [soundEnabled, setSoundEnabled] = useState(true);
   const [turnCountdown, setTurnCountdown] = useState<TurnCountdown | null>(null);
   const [isHistoryDialogOpen, setIsHistoryDialogOpen] = useState(false);
   const [teamSearch, setTeamSearch] = useState("");
@@ -203,6 +179,10 @@ export default function PlayerDraftPage() {
   const [autoPickFeedback, setAutoPickFeedback] = useState<{ turnKey: string; message: string } | null>(null);
   const hasInitializedTurnNotificationRef = useRef(false);
   const notificationPermissionRequestedRef = useRef(false);
+  const [pickAnnouncements, setPickAnnouncements] = useState<PickEvent[]>([]);
+  const finishPickAnnouncement = useCallback((id: string) => {
+    setPickAnnouncements((queue) => queue.filter((event) => event.id !== id));
+  }, []);
   const turnStartedAtMs = draft?.turnStartedAt?.toDate
     ? draft.turnStartedAt.toDate().getTime()
     : null;
@@ -220,6 +200,8 @@ export default function PlayerDraftPage() {
 
     let isMounted = true;
     let unsubscribe: (() => void) | null = null;
+    const pickHistory = new PickHistoryTracker();
+    let pendingAnnouncements: PickEvent[] = [];
 
     void (async () => {
       try {
@@ -228,7 +210,8 @@ export default function PlayerDraftPage() {
           return;
         }
 
-        const draftRef = firestoreApi.doc(db, "drafts", code);
+        setPickAnnouncements([]);
+        const draftRef = firestoreApi.doc(db, "publicDrafts", code);
         let lastObservedTurn: string | null = null;
         let snapshotRevision = 0;
         const handleSnapshot = (snapshot: DocumentSnapshot, source = "listener") => {
@@ -236,6 +219,25 @@ export default function PlayerDraftPage() {
           snapshotRevision += 1;
           if (snapshot.exists()) {
             const data = snapshot.data();
+            const currentRevision = snapshotRevision;
+            if (!user) {
+              setError("Přihlaste se pro přístup k hráčskému draftu.");
+              setIsLoading(false);
+              return;
+            }
+            const announcementScope = `${snapshot.id}:${user.uid}`;
+            pendingAnnouncements.push(...pickHistory.observe(announcementScope, {
+              history: (data.history ?? []) as DraftHistoryItem[],
+              participants: (data.participants ?? []) as DraftParticipant[],
+              draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map(normalizeDraftItem),
+            }, snapshot.metadata));
+            void getDraftPrivateAccess(snapshot.id).then((access) => {
+              if (!isMounted || snapshotRevision !== currentRevision) return;
+              if (access.authorized && pendingAnnouncements.length > 0) {
+                const confirmed = pendingAnnouncements;
+                pendingAnnouncements = [];
+                setPickAnnouncements(confirmed.slice(-1));
+              }
             const turnStartedAtValue = data.turnStartedAt;
             const hasToDate = typeof turnStartedAtValue === "object"
               && turnStartedAtValue !== null
@@ -274,10 +276,12 @@ export default function PlayerDraftPage() {
               margin: Number(data.margin ?? 0),
               targetBreakPrice: Number(data.targetBreakPrice ?? 0),
               participantCount: Number(data.participantCount ?? 0),
-              participants: (data.participants ?? []) as DraftParticipant[],
               currentPickIndex: Number(data.currentPickIndex ?? 0),
               pickOrder: (data.pickOrder ?? []) as number[],
-              draftItems: ((data.draftItems ?? []) as Array<DraftItem | string>).map((item) => normalizeDraftItem(item)),
+              draftItems: (Array.isArray(data.draftItems) && data.draftItems.length > 0
+                ? data.draftItems as Array<DraftItem | string>
+                : defaultDraftItems
+              ).map((item) => normalizeDraftItem(item)),
               availableItemIds: (data.availableItemIds ?? []) as string[],
               history: (data.history ?? []) as DraftHistoryItem[],
               turnDurationSeconds: data.turnDurationSeconds === null ? null : Number(data.turnDurationSeconds ?? 15),
@@ -285,13 +289,23 @@ export default function PlayerDraftPage() {
               boxes: (data.boxes ?? []) as DraftBox[],
               teamRanking: Array.isArray(data.teamRanking) ? (data.teamRanking as string[]) : undefined,
               teamRankingLocked: Boolean(data.teamRankingLocked || (data.status && data.status !== "waiting")),
-              playerPriorities: (data.playerPriorities ?? {}) as Record<string, string[]>,
+              participants: access.participants as DraftParticipant[],
+              playerPriorities: user
+                ? { [user.uid]: access.playerPriorities }
+                : {},
+            });
+            setIsLoading(false);
+            }).catch((accessError) => {
+              console.error(accessError);
+              if (isMounted && snapshotRevision === currentRevision) {
+                setError("Nepodařilo se ověřit přístup k draftu.");
+                setIsLoading(false);
+              }
             });
           } else {
             setDraft(null);
+            setIsLoading(false);
           }
-
-          setIsLoading(false);
         };
         refreshDraftRef.current = async (signal) => {
           const revisionBeforeRead = snapshotRevision;
@@ -302,6 +316,7 @@ export default function PlayerDraftPage() {
         };
         unsubscribe = firestoreApi.onSnapshot(
           draftRef,
+          { includeMetadataChanges: true },
           handleSnapshot,
           (loadError) => {
             console.error(loadError);
@@ -322,7 +337,7 @@ export default function PlayerDraftPage() {
       refreshDraftRef.current = null;
       unsubscribe?.();
     };
-  }, [code]);
+  }, [code, user]);
 
   useEffect(() => {
     if (draftStatus !== "drafting" || turnDurationSeconds === null
@@ -473,19 +488,7 @@ export default function PlayerDraftPage() {
       }
     }
 
-    if (soundEnabled) {
-      const playSound = async () => {
-        try {
-          const audio = new Audio("/sounds/your-turn.mp3");
-          await audio.play();
-        } catch {
-          // Zvuk není dostupný, přeskakujeme bez rozbití UI.
-        }
-      };
-
-      void playSound();
-    }
-  }, [draft, soundEnabled, user]);
+  }, [draft, user]);
 
   const availableItems = useMemo(() => {
     if (!draft) {
@@ -565,6 +568,18 @@ export default function PlayerDraftPage() {
       !isSubmittingPick &&
       !isTurnExpired,
   );
+  const sounds = usePlayerSounds(
+    draft && user && currentTurnKey ? {
+      scope: `${draft.id}:${user.uid}`,
+      key: `${draft.id}-${draft.currentPickIndex}`,
+      ownTurn: isCurrentUserTurn && !isCompleted && !isSubmittingPick && !isTurnExpired,
+      enabled: soundEnabled,
+      startedAt: turnStartedAtMs,
+      durationSeconds: draft.turnDurationSeconds,
+      secondsLeft: timeLeft,
+    } : null,
+    setSoundEnabled,
+  );
 
   const autoPickDraftId = draft?.id;
   const autoPickIndex = draft?.currentPickIndex;
@@ -607,8 +622,13 @@ export default function PlayerDraftPage() {
   const currentRound = draft
     ? Math.floor(draft.currentPickIndex / Math.max(1, draft.participantCount)) + 1
     : 1;
-  const totalPicks = draft ? Math.max(1, draft.pickOrder.length) : 0;
-  const currentPickNumber = draft ? Math.min(draft.currentPickIndex + 1, totalPicks) : 0;
+  const totalPicks = draft?.draftItems.length ?? 0;
+  const totalTurns = draft?.pickOrder.length ?? 0;
+  const currentPickNumber = draft ? Math.min(draft.currentPickIndex + 1, totalTurns) : 0;
+  const completedPickCount = draft?.history.filter((entry) => entry.type === "pick").length ?? 0;
+  const totalRounds = draft
+    ? Math.ceil(totalTurns / Math.max(1, draft.participantCount))
+    : 0;
 
   // Výpočet ceny za pozici pro hráčské rozhraní
   const paidSlots = draft
@@ -659,7 +679,7 @@ export default function PlayerDraftPage() {
   const draftRankingOrder = useMemo(() => {
     if (!draft) return defaultDraftItems.map((item) => item.id);
     if (draft.teamRanking && draft.teamRanking.length > 0) {
-      return ensureAllTeamsInOrder(draft.teamRanking);
+      return ensureAllTeamsInOrder(draft.teamRanking, draft.draftItems);
     }
     return draft.draftItems.map((item) => item.id);
   }, [draft]);
@@ -710,10 +730,10 @@ export default function PlayerDraftPage() {
     if (!initialOrder) {
       initialOrder = draft.teamRanking && draft.teamRanking.length > 0
         ? draft.teamRanking
-        : defaultDraftItems.map((item) => item.id);
+        : draft.draftItems.map((item) => item.id);
     }
 
-    const valid = ensureAllTeamsInOrder(initialOrder);
+    const valid = ensureAllTeamsInOrder(initialOrder, draft.draftItems);
     setMyPrioritiesOrder(valid);
     setSavedPrioritiesOrder(valid);
   }, [draft, user, currentUserParticipant]);
@@ -772,38 +792,34 @@ export default function PlayerDraftPage() {
 
   async function handleSavePriorities(orderToSave?: string[]) {
     if (!draft || !user) return;
-    const order = ensureAllTeamsInOrder(orderToSave ?? myPrioritiesOrder);
+    const order = ensureAllTeamsInOrder(orderToSave ?? myPrioritiesOrder, draft.draftItems);
     setIsSavingPriorities(true);
     setPrioritiesFeedback(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-
-      const nextParticipants = draft.participants.map((p) =>
-        p.userId === user.uid ? { ...p, priorities: order } : p
-      );
-
-      await firestoreApi.updateDoc(firestoreApi.doc(db, "drafts", draft.id), {
-        participants: nextParticipants,
-        [`playerPriorities.${user.uid}`]: order,
-        updatedAt: firestoreApi.serverTimestamp(),
+      await callFirestoreWorker("draft.priorities", {
+        draftId: draft.id,
+        priorities: order,
       });
-
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
-      }
-
-      setSavedPrioritiesOrder(order);
-      setMyPrioritiesOrder(order);
-      setPrioritiesFeedback("✓ Vaše priority byly úspěšně uloženy.");
     } catch (err) {
       console.error("Error saving priorities:", err);
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
-      }
-      setPrioritiesFeedback("Priority byly uloženy v tomto prohlížeči.");
+      const message = err instanceof Error ? err.message : "Zkuste akci opakovat.";
+      setPrioritiesFeedback(`Nepodařilo se uložit priority do draftu. ${message}`);
+      return;
     } finally {
       setIsSavingPriorities(false);
+    }
+
+    setSavedPrioritiesOrder(order);
+    setMyPrioritiesOrder(order);
+    setPrioritiesFeedback("✓ Vaše priority byly úspěšně uloženy.");
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(`dm-draft-priorities:${draft.id}:${user.uid}`, JSON.stringify(order));
+      } catch (cacheError) {
+        console.error("Error caching saved priorities:", cacheError);
+        setPrioritiesFeedback("✓ Vaše priority byly uloženy do draftu, ale kopii v prohlížeči se nepodařilo uložit.");
+      }
     }
   }
 
@@ -823,111 +839,33 @@ export default function PlayerDraftPage() {
       return;
     }
 
+    sounds.stop();
     setIsSubmittingPick(true);
     setError(null);
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.runTransaction(db, async (transaction) => {
-        const draftRef = firestoreApi.doc(db, "drafts", draft.id);
-        const latestSnapshot = await transaction.get(draftRef);
-
-        if (!latestSnapshot.exists()) {
-          throw new Error("Draft nebyl nalezen.");
-        }
-
-        const latestData = latestSnapshot.data();
-        const latestParticipants = (latestData.participants ?? []) as DraftParticipant[];
-        const latestPickOrder = (latestData.pickOrder ?? []) as number[];
-        const latestCurrentPickIndex = Number(latestData.currentPickIndex ?? 0);
-        const latestStatus = latestData.status ?? "waiting";
-        const latestAvailableItemIds = (latestData.availableItemIds ?? []) as string[];
-        const latestHistory = (latestData.history ?? []) as DraftHistoryItem[];
-        const latestCurrentParticipantIndex = latestPickOrder[latestCurrentPickIndex];
-        const latestCurrentParticipant = latestParticipants[latestCurrentParticipantIndex];
-        const expectedCurrentPickIndex = draft.currentPickIndex;
-        const expectedParticipantIndex = draft.pickOrder[expectedCurrentPickIndex];
-        const expectedParticipantUserId = currentParticipant.userId ?? "";
-
-        if (latestStatus !== "drafting") {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentPickIndex !== expectedCurrentPickIndex) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentParticipantIndex !== expectedParticipantIndex) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (!latestCurrentParticipant?.userId || latestCurrentParticipant.userId !== expectedParticipantUserId) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (latestCurrentParticipant.userId !== user.uid) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        if (!latestAvailableItemIds.includes(item.id)) {
-          throw new Error(PICK_CONFLICT_ERROR);
-        }
-
-        const nextPickIndex = latestCurrentPickIndex + 1;
-        const nextAvailableItemIds = latestAvailableItemIds.filter((availableItemId) => availableItemId !== item.id);
-        const nextStatus =
-          nextPickIndex >= latestPickOrder.length || nextAvailableItemIds.length === 0
-            ? "completed"
-            : "drafting";
-        const nextParticipants = latestParticipants.map((participant, index) =>
-          index === latestCurrentParticipantIndex ? { ...participant, picks: [...participant.picks, item.id] } : participant,
-        );
-        const nextHistory = [
-          ...latestHistory,
-          {
-            type: "pick" as const,
-            participantIndex: latestCurrentParticipantIndex,
-            itemId: item.id,
-            itemName: item.name,
-          },
-        ];
-
-        const nextDraftUpdate = {
-          status: nextStatus,
-          participants: nextParticipants,
-          currentPickIndex: nextPickIndex,
-          availableItemIds: nextAvailableItemIds,
-          history: nextHistory,
-          turnDurationSeconds: latestData.turnDurationSeconds === null ? null : Number(latestData.turnDurationSeconds ?? 15),
-          updatedAt: firestoreApi.serverTimestamp(),
-        } as Record<string, unknown>;
-
-        if (nextStatus === "drafting") {
-          nextDraftUpdate.turnStartedAt = firestoreApi.serverTimestamp();
-        } else {
-          nextDraftUpdate.turnStartedAt = firestoreApi.deleteField();
-        }
-
-        transaction.update(draftRef, nextDraftUpdate);
+      await callFirestoreWorker("draft.pick", {
+        draftId: draft.id,
+        itemId: item.id,
+        expectedPickIndex: draft.currentPickIndex,
       });
     } catch (pickError) {
       console.error(pickError);
-      if (pickError instanceof Error && pickError.message === PICK_CONFLICT_ERROR) {
-        setError(INVALID_PICK_MESSAGE);
+      if (pickError instanceof FirestoreWorkerError && pickError.status === 409) {
+        try {
+          const refreshDraft = refreshDraftRef.current;
+          if (!refreshDraft) throw new Error("Draft listener is not ready.");
+          await refreshDraft(new AbortController().signal);
+          setError(null);
+        } catch (refreshError) {
+          console.error("Could not refresh the draft after a concurrent pick.", refreshError);
+          setError("Nepodařilo se aktualizovat stav draftu po souběžném výběru.");
+        }
       } else {
         setError("Nepodařilo se uložit výběr.");
       }
     } finally {
       setIsSubmittingPick(false);
-    }
-  }
-
-  function toggleSound() {
-    const nextEnabled = !soundEnabled;
-    setSoundEnabled(nextEnabled);
-
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem("dm-draft-sound-enabled", String(nextEnabled));
     }
   }
 
@@ -1042,6 +980,9 @@ export default function PlayerDraftPage() {
     <div className="min-h-screen text-slate-100">
       <Navbar />
 
+      {pickAnnouncements[0]?.scope === `${draft.id}:${user?.uid}` && hasPlayAccess ? (
+        <PickAnnouncement key={pickAnnouncements[0].id} event={pickAnnouncements[0]} onComplete={finishPickAnnouncement} />
+      ) : null}
       <PageContainer className="py-6 lg:py-8">
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 sm:gap-6">
           {/* Sticky Alert for Mobile when Current User is on turn */}
@@ -1086,12 +1027,16 @@ export default function PlayerDraftPage() {
                 </div>
                 <button
                   type="button"
-                  onClick={toggleSound}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  onClick={sounds.toggle}
+                  aria-pressed={soundEnabled}
                   className="rounded-2xl border border-slate-700/80 bg-slate-950/80 px-3.5 py-2 text-xs font-bold text-slate-200 transition hover:border-[#18C964]/40 hover:bg-slate-800"
                   title={soundEnabled ? "Vypnout zvuk" : "Zapnout zvuk"}
                 >
                   {soundEnabled ? "🔊 Zvuk ZAP" : "🔇 Zvuk VYP"}
                 </button>
+                {sounds.error ? <p role="alert" className="text-xs text-red-300">{sounds.error}</p> : null}
               </div>
             </div>
 
@@ -1105,7 +1050,7 @@ export default function PlayerDraftPage() {
                       Draft zatím nebyl zahájen
                     </p>
                     <p className="mt-0.5 text-xs text-slate-300">
-                      Máte dostatek času na přípravu. V záložce <strong className="text-white">Moje priority</strong> si můžete seřadit všech 32 týmů a v záložce <strong className="text-white">Žebříček draftu</strong> prohlédnout oficiální pořadí.
+                      Máte dostatek času na přípravu. V záložce <strong className="text-white">Moje priority</strong> si můžete seřadit všech {draft.draftItems.length} týmů a v záložce <strong className="text-white">Žebříček draftu</strong> prohlédnout oficiální pořadí.
                     </p>
                   </div>
                 </div>
@@ -1140,21 +1085,21 @@ export default function PlayerDraftPage() {
                   </div>
 
                   <h2 className="mt-2 text-2xl font-black tracking-tight text-white sm:text-4xl">
-                    DRAFT DOKONČEN
+                    Draft dokončen
                   </h2>
 
                   <p className="mt-1 text-xs font-semibold text-[#8ef0b5] sm:text-sm">
-                    Všech 32 týmů bylo rozebráno. Děkujeme za účast!
+                    Všechny týmy byly rozděleny. Děkujeme za účast!
                   </p>
 
                   <div className="mt-4 flex flex-wrap gap-2 text-xs">
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Celkem kol</span>
-                      <span className="text-white">{currentRound}</span>
+                      <span className="text-white">{totalRounds}</span>
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Výběrů</span>
-                      <span className="text-[#8ef0b5]">{draft.history.length}</span>
+                      <span className="text-[#8ef0b5]">{completedPickCount}</span>
                       <span className="text-slate-500">/ {totalPicks}</span>
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-950/60 px-3 py-1.5 font-bold text-[#8ef0b5]">
@@ -1219,7 +1164,7 @@ export default function PlayerDraftPage() {
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Tah</span>
                       <span className="text-[#8ef0b5]">{currentPickNumber}</span>
-                      <span className="text-slate-500">/ {totalPicks}</span>
+                      <span className="text-slate-500">/ {totalTurns}</span>
                     </span>
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 font-bold text-slate-200">
                       <span className="text-slate-400">Dostupných týmů</span>
@@ -1239,7 +1184,7 @@ export default function PlayerDraftPage() {
 
                   <div className="my-3 text-center sm:text-left">
                     <p className="text-xl font-bold text-white sm:text-2xl">
-                      Všech 32 týmů bylo rozebráno
+                      Všechny týmy byly rozděleny
                     </p>
                     <p className="mt-1 text-xs text-slate-400">
                       Výsledky a týmy účastníků naleznete níže v přehledu.
@@ -1517,7 +1462,7 @@ export default function PlayerDraftPage() {
                                   : "bg-slate-800 text-slate-300"
                               }`}
                             >
-                              32
+                              {draft.draftItems.length}
                             </span>
                           )}
                         </button>
@@ -1542,7 +1487,7 @@ export default function PlayerDraftPage() {
                                 : "bg-slate-800 text-slate-300"
                             }`}
                           >
-                            32
+                            {draft.draftItems.length}
                           </span>
                         </button>
                       </div>
@@ -1562,7 +1507,7 @@ export default function PlayerDraftPage() {
                           <div>
                             <div className="flex items-center gap-2">
                               <h3 className="text-xl font-black tracking-tight text-white sm:text-2xl">
-                                Dostupné NHL týmy
+                                Dostupné týmy
                               </h3>
                               <span className="rounded-full border border-[#18C964]/30 bg-[#18C964]/10 px-2.5 py-0.5 text-xs font-bold text-[#8ef0b5]">
                                 {availableItems.length}
@@ -1570,7 +1515,7 @@ export default function PlayerDraftPage() {
                             </div>
                             <p className="mt-1 text-xs text-slate-400">
                               {isCompleted
-                                ? "Všech 32 týmů bylo rozebráno. Draft je u konce."
+                                ? "Všechny týmy byly rozděleny. Draft je u konce."
                                 : canPickTeam
                                   ? "👉 Jste na tahu! Klikněte na tlačítko „Vybrat“ u vašeho vybraného týmu."
                                   : "Výběr týmu je aktivní pouze tehdy, když jste na tahu."}
@@ -1629,8 +1574,10 @@ export default function PlayerDraftPage() {
                                     />
                                   </div>
 
-                                  <p className="mt-2.5 line-clamp-2 text-xs font-bold leading-tight text-white transition group-hover:text-[#8ef0b5] sm:text-sm">
-                                    {item.name}
+                                  <p className="mt-2.5 min-h-[2.5em] w-full min-w-0 text-xs font-bold leading-tight text-white transition group-hover:text-[#8ef0b5] sm:text-sm">
+                                    {getTeamNameLines(item).map((line, index) => (
+                                      <span key={index} className="block truncate" title={line}>{line}</span>
+                                    ))}
                                   </p>
 
                                   <div className="mt-3.5 w-full">
@@ -1687,11 +1634,11 @@ export default function PlayerDraftPage() {
                                 Moje priority výběru
                               </h3>
                               <span className="rounded-full border border-[#18C964]/30 bg-[#18C964]/10 px-2.5 py-0.5 text-xs font-bold text-[#8ef0b5]">
-                                32 týmů
+                                {draft.draftItems.length} týmů
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-400">
-                              Seřaďte si všech 32 týmů přetažením myší nebo tlačítky ▲ / ▼. Již vybrané týmy budou automaticky přeskočeny.
+                              Seřaďte si všech {draft.draftItems.length} týmů přetažením myší nebo tlačítky ▲ / ▼. Již vybrané týmy budou automaticky přeskočeny.
                             </p>
                           </div>
 
@@ -1909,11 +1856,11 @@ export default function PlayerDraftPage() {
                                 Žebříček draftu (společné pořadí)
                               </h3>
                               <span className="rounded-full border border-[#18C964]/30 bg-[#18C964]/10 px-2.5 py-0.5 text-xs font-bold text-[#8ef0b5]">
-                                32 týmů
+                                {draft.draftItems.length} týmů
                               </span>
                             </div>
                             <p className="mt-1 text-xs text-slate-400">
-                              Společné pořadí atraktivity všech 32 týmů NHL vypočtené ze zvolených boxů a nastavené organizátorem pro tento draft.
+                              Společné pořadí atraktivity všech týmů vypočtené ze zvolených boxů a nastavené organizátorem pro tento draft.
                             </p>
                           </div>
 
@@ -2140,6 +2087,11 @@ export default function PlayerDraftPage() {
                                 <p className="truncate text-sm font-bold text-white">
                                   {participant.name || `Účastník ${index + 1}`}
                                 </p>
+                                {participant.status === "pending-registration" ? (
+                                  <span className="rounded-md bg-amber-400/10 px-1.5 py-0.5 text-[10px] font-bold text-amber-200">
+                                    Čeká na registraci
+                                  </span>
+                                ) : null}
                                 {isMe ? (
                                   <span className="rounded-md bg-[#18C964]/20 px-1.5 py-0.5 text-[10px] font-black uppercase text-[#8ef0b5]">
                                     Vy

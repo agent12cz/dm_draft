@@ -13,6 +13,7 @@ export class FirebaseAuthError extends Error {
 
 export type VerifiedFirebaseUser = {
   uid: string;
+  email?: string;
 };
 
 type SigningKeyEntry = {
@@ -185,5 +186,8 @@ export async function verifyFirebaseIdToken(
     throw new FirebaseAuthError("The Firebase ID token reports a future authentication time.");
   }
 
-  return { uid: payload.sub };
+  return {
+    uid: payload.sub,
+    email: typeof payload.email === "string" ? payload.email : undefined,
+  };
 }

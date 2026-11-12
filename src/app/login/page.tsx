@@ -7,6 +7,7 @@ import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 import { useAuth } from "@/components/AuthProvider";
+import { getAuthRedirect } from "@/lib/authRedirect";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -36,13 +37,19 @@ export default function LoginPage() {
       return;
     }
 
+    const invitationRedirect = getAuthRedirect();
+    if (invitationRedirect) {
+      router.replace(invitationRedirect);
+      return;
+    }
+
     if (profile?.role === "admin") {
       router.replace("/");
       return;
     }
 
     router.replace("/join");
-  }, [loading, profile?.role, router, user]);
+  }, [loading, profile, router, user]);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();

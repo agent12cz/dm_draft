@@ -1,11 +1,13 @@
 import { defaultDraftItems, type DraftItem } from "./snakeDraft";
+import type { ProductSport } from "./products";
 
 export type TeamRankingRecord = {
   id: string; // Document ID, equal to productKey
   series: string; // e.g. "Series One"
   season: string; // e.g. "2026/27"
   productKey: string; // Unique key combining series and season
-  teamOrder: string[]; // Exactly 32 team IDs in order of attractiveness (index 0 = rank 1)
+  sport?: ProductSport;
+  teamOrder: string[]; // All team IDs in order of attractiveness (index 0 = rank 1)
   createdAt?: unknown;
   updatedAt?: unknown;
 };
@@ -13,6 +15,7 @@ export type TeamRankingRecord = {
 export type BoxSelection = {
   id?: string;
   productId?: string;
+  sport?: ProductSport;
   productName: string;
   productSeason: string;
   boxCount: number;
@@ -34,7 +37,7 @@ export type CalculatedTeamRank = {
     boxCount: number;
     rank: number;
   }>;
-  finalRank: number; // 1 to 32
+  finalRank: number; // 1 to the number of teams in the ranking
 };
 
 /**
@@ -61,8 +64,20 @@ export function createProductKey(series: string, season: string): string {
   return `${cleanSeries || "unnamed"}__${cleanSeason || "general"}`;
 }
 
+export function createSportRankingKey(sport: ProductSport, series: string, season: string): string {
+  const productKey = createProductKey(series, season);
+  return sport === "NHL" ? productKey : `${sport.toLowerCase()}__${productKey}`;
+}
+
+export function filterRankingsBySport(
+  rankings: TeamRankingRecord[],
+  sport: ProductSport,
+): TeamRankingRecord[] {
+  return rankings.filter((ranking) => (ranking.sport ?? "NHL") === sport);
+}
+
 /**
- * Ensures that a given team order contains all 32 teams without duplicates.
+ * Ensures that a given team order contains every team without duplicates.
  * Any missing teams are appended at the end in their default order.
  */
 export function ensureAllTeamsInOrder(
@@ -93,7 +108,7 @@ export function ensureAllTeamsInOrder(
 }
 
 /**
- * Calculates a combined, weighted attractiveness ranking for all 32 NHL teams across multiple boxes.
+ * Calculates a combined, weighted attractiveness ranking across multiple boxes.
  *
  * Formula:
  *   score = sum(boxCount_i * rankInBox_i) / totalBoxCount
@@ -128,14 +143,18 @@ export function calculateCombinedTeamRanking(
 
   const totalBoxCount = validBoxes.reduce((sum, box) => sum + box.boxCount, 0);
 
-  // Resolve team order (1..32) for each box
+  // Resolve a complete team order for each box.
   const boxRankings = validBoxes.map((box) => {
     const productKey = createProductKey(box.productName, box.productSeason);
+    const sport = box.sport ?? "NHL";
+    const sportRankingKey = createSportRankingKey(sport, box.productName, box.productSeason);
+    const savedRanking = customRankingsByProductKey[sportRankingKey] ??
+      (sport === "NHL" ? customRankingsByProductKey[productKey] : undefined);
     const order =
       box.teamOrder && box.teamOrder.length > 0
         ? ensureAllTeamsInOrder(box.teamOrder, allTeams)
-        : customRankingsByProductKey[productKey]
-          ? ensureAllTeamsInOrder(customRankingsByProductKey[productKey], allTeams)
+        : savedRanking
+          ? ensureAllTeamsInOrder(savedRanking, allTeams)
           : allTeams.map((t) => t.id);
 
     const rankMap = new Map<string, number>();

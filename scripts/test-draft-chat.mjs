@@ -33,6 +33,38 @@ assert.doesNotMatch(chat.getText(playerSource), /\bkey=|mobileTab|sidebarTab/);
 assert.doesNotMatch(readFileSync(playerPath, "utf8"), /set(?:Mobile|Sidebar)Tab\("chat"\)/);
 console.log("✓ Exactly one unconditionally mounted chat precedes My Teams outside the tab panels");
 
+const adminPath = new URL("../src/app/draft/[code]/page.tsx", import.meta.url);
+const adminSource = ts.createSourceFile(
+  adminPath.pathname, readFileSync(adminPath, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX,
+);
+assert.equal(adminSource.parseDiagnostics.length, 0);
+const adminChats = [];
+function visitAdmin(node) {
+  if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(adminSource) === "DraftChat") {
+    adminChats.push(node);
+  }
+  ts.forEachChild(node, visitAdmin);
+}
+visitAdmin(adminSource);
+assert.equal(adminChats.length, 1);
+const adminChat = adminChats[0];
+assert.equal(ts.isJsxElement(adminChat.parent), true);
+const adminChatCard = adminChat.parent;
+assert.equal(ts.isJsxElement(adminChatCard.parent), true);
+const adminTopGrid = adminChatCard.parent;
+assert.match(adminTopGrid.openingElement.getText(adminSource), /xl:grid-cols/);
+const adminTopPanels = adminTopGrid.children.filter((node) =>
+  ts.isJsxElement(node) && node.openingElement.tagName.getText(adminSource) === "Card",
+);
+assert.equal(adminTopPanels.length, 3);
+assert.match(adminTopPanels[0].getText(adminSource), /Administrace draftu/);
+assert.match(adminTopPanels[1].getText(adminSource), /Draft ještě nezačal/);
+assert.equal(adminTopPanels[2], adminChatCard);
+assert.match(adminChat.getText(adminSource), /isEmbedded/);
+assert.match(adminChat.getText(adminSource), /h-80/);
+assert.doesNotMatch(adminTopGrid.getText(adminSource), /<details/);
+console.log("✓ Admin chat is always mounted once in the bounded top panel beside the draft controls and turn");
+
 const slots = [];
 const effects = [];
 let cursor = 0;
@@ -91,10 +123,18 @@ runInNewContext(compiled, {
   require: (name) => {
     if (name === "react") return hooks;
     if (name === "@/lib/firebase") return { getFirebaseClient: async () => ({ db: {}, firestoreApi }) };
+    if (name === "@/lib/firestoreWorker") return {
+      callFirestoreWorker: async (operation, payload) => {
+        writes.push({ operation, payload });
+        return { status: "sent" };
+      },
+      getDraftPrivateAccess: async () => ({ authorized: true, chatAuthorId: "own-author-id" }),
+    };
     return require(name);
   },
   console,
   Intl,
+  window: { setInterval: () => 1, clearInterval: () => {} },
 });
 const { DraftChat } = chatModule.exports;
 function find(node, predicate) {
@@ -125,29 +165,22 @@ async function settle() {
 }
 render();
 await settle();
-assert.equal(subscriptions, 2);
-listeners.get("drafts/ABCDE")({
-  exists: () => true,
-  data: () => ({ participants: [{ userId: "player-1" }] }),
-});
+assert.equal(subscriptions, 1);
 let tree = render();
 const textarea = () => find(tree, (node) => node.type === "textarea");
 textarea().props.onChange({ target: { value: "Rozpracovaná zpráva" } });
 for (let index = 0; index < 10; index += 1) {
-  listeners.get("drafts/ABCDE")({
-    exists: () => true,
-    data: () => ({ participants: [{ userId: "player-1" }], currentPickIndex: index }),
-  });
-  tree = render();
+  emitMessages(`Draft update ${index}`);
   await settle();
 }
 assert.equal(textarea().props.value, "Rozpracovaná zpráva");
-assert.equal(subscriptions, 2);
+assert.equal(subscriptions, 1);
 assert.equal(unsubscriptions, 0);
-console.log("✓ Ten draft updates preserve the composer and keep one access and one messages listener");
+scrolls.length = 0;
+console.log("✓ Chat updates preserve the composer and keep one message listener");
 
 function emitMessages(text) {
-  listeners.get("drafts/ABCDE/messages")({
+  listeners.get("publicDrafts/ABCDE/messages")({
     docs: [{
       id: text,
       data: (options) => {
@@ -183,6 +216,43 @@ assert.equal(scrolls.length, 2);
 assert.equal(textarea().props.value, "Rozpracovaná zpráva");
 console.log("✓ Reading older messages suspends auto-scroll; returning to the bottom resumes it");
 
+listeners.get("publicDrafts/ABCDE/messages")({
+  docs: [
+    {
+      id: "legacy-foreign",
+      data: () => ({ userId: "admin-1", displayName: "Admin One", role: "admin", text: "Legacy cizí" }),
+    },
+    {
+      id: "legacy-own",
+      data: () => ({ userId: "player-1", displayName: "Player One", role: "participant", text: "Legacy vlastní" }),
+    },
+    {
+      id: "new-own",
+      data: () => ({ authorId: "own-author-id", displayName: "Player One", role: "participant", text: "Nová vlastní" }),
+    },
+    {
+      id: "new-foreign",
+      data: () => ({ authorId: "other-author-id", displayName: "Admin One", role: "admin", text: "Nová cizí" }),
+    },
+  ],
+});
+tree = render();
+const bubbles = [];
+(function collect(node) {
+  if (Array.isArray(node)) return node.forEach(collect);
+  if (!isValidElement(node)) return;
+  if (typeof node.props.className === "string" && /^flex justify-(end|start)$/.test(node.props.className)) {
+    bubbles.push({ own: node.props.className.includes("justify-end"), html: renderToStaticMarkup(node) });
+  }
+  collect(node.props.children);
+})(tree);
+assert.deepEqual(
+  bubbles.map((bubble) => bubble.own),
+  [false, true, true, false],
+);
+assert.doesNotMatch(renderToStaticMarkup(tree), /player-1|admin-1|own-author-id|other-author-id/);
+console.log("✓ Own messages are matched by the opaque author ID (with legacy userId fallback) and no identifier is rendered");
+
 let prevented = false;
 textarea().props.onKeyDown({ key: "Enter", shiftKey: true, preventDefault: () => { prevented = true; } });
 assert.equal(writes.length, 0);
@@ -192,11 +262,12 @@ await settle();
 tree = render();
 assert.equal(prevented, true);
 assert.equal(writes.length, 1);
-assert.equal(writes[0].path, "drafts/ABCDE/messages");
-assert.equal(writes[0].data.text, "Rozpracovaná zpráva");
+assert.equal(writes[0].operation, "draft.message");
+assert.equal(writes[0].payload.draftId, "ABCDE");
+assert.equal(writes[0].payload.text, "Rozpracovaná zpráva");
 assert.equal(textarea().props.value, "");
 slots.forEach((slot) => slot?.cleanup?.());
-assert.equal(unsubscriptions, 2);
+assert.equal(unsubscriptions, 1);
 assert.equal(listeners.size, 0);
-console.log("✓ Enter sends through the unchanged Firestore path, Shift+Enter does not, and unmount cleans up listeners");
+console.log("✓ Enter sends through the authorized Worker, Shift+Enter does not, and unmount cleans up listeners");
 console.log("\nALL DRAFT CHAT REGRESSION TESTS PASSED!");

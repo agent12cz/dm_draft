@@ -7,9 +7,10 @@ import {
 } from "../workers/firebaseAuth.ts";
 import { runExpiredDraftPicks, runImmediateDraftPick } from "../workers/firestore.ts";
 import { consumeRateLimit, resetRateLimits } from "../workers/rateLimit.ts";
+import { buildSnakeOrder } from "../src/lib/snakeDraft.js";
 
 const PROJECT_ID = "dm-draft-c9a3d";
-const DOCUMENT_NAME = `projects/${PROJECT_ID}/databases/(default)/documents/drafts/ABCDE`;
+const DOCUMENT_NAME = `projects/${PROJECT_ID}/databases/(default)/documents/publicDrafts/ABCDE`;
 
 const signingKeyPair = await crypto.subtle.generateKey(
   {
@@ -102,25 +103,42 @@ function expiredDraftFixture(overrides = {}) {
   };
 }
 
-function lastTeamDraftFixture() {
-  const draftItems = Array.from({ length: 32 }, (_, index) => ({
+function lastTeamDraftFixture(teamCount, participantCount) {
+  const draftItems = Array.from({ length: teamCount }, (_, index) => ({
     id: `team-${index + 1}`,
     name: `Team ${index + 1}`,
   }));
+  const pickOrder = buildSnakeOrder(participantCount, teamCount);
+  const participants = Array.from({ length: participantCount }, (_, index) => ({
+    id: `participant-${index + 1}`,
+    userId: `player-${index + 1}`,
+    name: `Player ${index + 1}`,
+    picks: [],
+  }));
+  const history = [];
+
+  for (let index = 0; index < teamCount - 1; index += 1) {
+    const item = draftItems[index];
+    const participantIndex = pickOrder[index];
+    participants[participantIndex].picks.push(item.id);
+    history.push({
+      type: "pick",
+      participantIndex,
+      itemId: item.id,
+      itemName: item.name,
+    });
+  }
 
   return {
     status: "drafting",
-    participants: [
-      { id: "participant-1", userId: "player-1", name: "Player 1", picks: [] },
-      { id: "participant-2", userId: "player-2", name: "Player 2", picks: [] },
-    ],
-    currentPickIndex: 31,
-    pickOrder: Array.from({ length: 32 }, (_, index) => index % 2),
-    availableItemIds: ["team-32"],
+    participants,
+    currentPickIndex: teamCount - 1,
+    pickOrder,
+    availableItemIds: [draftItems.at(-1).id],
     draftItems,
     teamRanking: draftItems.map((item) => item.id),
     playerPriorities: {},
-    history: [],
+    history,
     turnDurationSeconds: 30,
     turnStartedAt: new Date(Date.now() - 60_000).toISOString(),
   };
@@ -196,12 +214,15 @@ function createFirestoreMock(initialDraft) {
       return Response.json({ writeResults: [] });
     }
 
-    if (url.includes("/documents/drafts/")) {
+    if (url.includes("/documents/publicDrafts/")) {
       const transaction = new URL(url).searchParams.get("transaction");
       if (transaction) {
         transactionReads.set(transaction, current.currentPickIndex);
       }
       return Response.json({ name: DOCUMENT_NAME, fields: firestoreFields(current) });
+    }
+    if (url.includes("/documents/draftPrivate/")) {
+      return Response.json({ error: { status: "NOT_FOUND" } }, { status: 404 });
     }
 
     throw new Error(`Unexpected request: ${url}`);
@@ -222,6 +243,34 @@ function createFirestoreMock(initialDraft) {
 }
 
 console.log("Running instant automatic pick tests...");
+
+for (const trigger of ["immediate", "cron"]) {
+  for (const identity of [
+    { userId: "player-1" },
+    { userId: "", uid: "player-1" },
+    { uid: "player-1" },
+  ]) {
+    const mock = createFirestoreMock(expiredDraftFixture({
+      participants: [
+        { id: "participant-1", name: "Player 1", picks: [], ...identity },
+        { id: "participant-2", userId: "player-2", name: "Player 2", picks: [] },
+      ],
+      playerPriorities: { "player-1": ["team-a", "team-b"] },
+    }));
+    if (trigger === "immediate") {
+      const result = await runImmediateDraftPick(
+        workerEnv, { draftId: "ABCDE", userId: "player-1", expectedPickIndex: 0 }, mock.fetchMock,
+      );
+      assert.equal(result.status, "picked");
+    } else {
+      assert.equal((await runExpiredDraftPicks(workerEnv, mock.fetchMock)).picked, 1);
+    }
+    assert.equal(mock.getDraft().history.at(-1).itemId, "team-a");
+    assert.equal(mock.getDraft().history.at(-1).autoPickReason, "player-priorities");
+    assert.deepEqual(mock.getDraft().participants[0].picks, ["team-a"]);
+  }
+  console.log(`✓ ${trigger}: legacy drafts without a private document support canonical userId and legacy UID priorities`);
+}
 
 {
   const teams = Array.from({ length: 10 }, (_, index) => ({
@@ -394,36 +443,62 @@ console.log("Running instant automatic pick tests...");
 }
 
 {
-  const mock = createFirestoreMock(lastTeamDraftFixture());
-  const result = await runImmediateDraftPick(
-    workerEnv,
-    { draftId: "ABCDE", userId: "player-1", expectedPickIndex: 31 },
-    mock.fetchMock,
-  );
+  for (const [teamCount, participantCount] of [[14, 3], [30, 4], [32, 5]]) {
+    const mock = createFirestoreMock(lastTeamDraftFixture(teamCount, participantCount));
+    const result = await runImmediateDraftPick(
+      workerEnv,
+      { draftId: "ABCDE", userId: "player-1", expectedPickIndex: teamCount - 1 },
+      mock.fetchMock,
+    );
 
-  const write = mock.getCommits()[0];
-  assert.equal(result.status, "picked");
-  assert.equal(result.completed, true);
-  assert.equal(decode(write.update.fields.status), "completed");
-  assert.equal(write.updateMask.fieldPaths.includes("turnStartedAt"), true);
-  assert.equal(
-    write.updateTransforms.some((transform) => transform.fieldPath === "turnStartedAt"),
-    false,
-  );
-  assert.equal(mock.getDraft().status, "completed");
-  assert.equal(mock.getDraft().turnStartedAt, undefined);
+    const write = mock.getCommits()[0];
+    assert.equal(result.status, "picked");
+    assert.equal(result.completed, true);
+    assert.equal(decode(write.update.fields.status), "completed");
+    assert.equal(write.updateMask.fieldPaths.includes("turnStartedAt"), true);
+    assert.equal(
+      write.updateTransforms.some((transform) => transform.fieldPath === "turnStartedAt"),
+      false,
+    );
+    assert.equal(mock.getDraft().status, "completed");
+    assert.equal(mock.getDraft().turnStartedAt, undefined);
+    assert.equal(mock.getDraft().history.length, teamCount);
+    assert.equal(
+      new Set(mock.getDraft().participants.flatMap((participant) => participant.picks)).size,
+      teamCount,
+    );
 
-  const cronSummary = await runExpiredDraftPicks(workerEnv, mock.fetchMock);
-  const afterCompletion = await runImmediateDraftPick(
-    workerEnv,
-    { draftId: "ABCDE", userId: "player-1", expectedPickIndex: 31 },
-    mock.fetchMock,
-  );
+    const cronSummary = await runExpiredDraftPicks(workerEnv, mock.fetchMock);
+    const afterCompletion = await runImmediateDraftPick(
+      workerEnv,
+      { draftId: "ABCDE", userId: "player-1", expectedPickIndex: teamCount - 1 },
+      mock.fetchMock,
+    );
 
-  assert.equal(cronSummary.candidates, 0);
-  assert.equal(afterCompletion.status, "changed");
-  assert.equal(mock.getCommits().length, 1);
-  console.log("✓ Poslední 32. tým ukončí draft bez dalšího odpočtu a autopicku");
+    assert.equal(cronSummary.candidates, 0);
+    assert.equal(afterCompletion.status, "changed");
+    assert.equal(mock.getCommits().length, 1);
+  }
+  console.log("✓ Poslední okamžitý výběr u draftů 14, 30 a 32 týmů dokončí draft právě jednou");
+}
+
+{
+  for (const [teamCount, participantCount] of [[14, 3], [30, 4], [32, 5]]) {
+    const mock = createFirestoreMock(lastTeamDraftFixture(teamCount, participantCount));
+    const summary = await runExpiredDraftPicks(workerEnv, mock.fetchMock);
+
+    assert.equal(summary.candidates, 1);
+    assert.equal(summary.picked, 1);
+    assert.equal(mock.getDraft().status, "completed");
+    assert.equal(mock.getDraft().currentPickIndex, teamCount);
+    assert.equal(mock.getDraft().availableItemIds.length, 0);
+    assert.equal(mock.getDraft().history.length, teamCount);
+
+    const repeatedCron = await runExpiredDraftPicks(workerEnv, mock.fetchMock);
+    assert.equal(repeatedCron.candidates, 0);
+    assert.equal(mock.getCommits().length, 1);
+  }
+  console.log("✓ Cron dokončí poslední výběr u draftů 14, 30 a 32 týmů a po dokončení nic neopakuje");
 }
 
 {
@@ -449,6 +524,20 @@ console.log("Running instant automatic pick tests...");
   assert.equal(mock.getDraft().currentPickIndex, 1);
   assert.equal(mock.getDraft().history.at(-1).automatic, true);
   console.log("✓ Organizátor bez účastnického místa může vyvolat okamžitý výběr");
+}
+
+{
+  const draft = expiredDraftFixture();
+  draft.participants.splice(1, 0, null);
+  const mock = createFirestoreMock(draft);
+  const result = await runImmediateDraftPick(
+    workerEnv,
+    { draftId: "ABCDE", userId: "organizer-1", expectedPickIndex: 0 },
+    mock.fetchMock,
+  );
+  assert.equal(result.status, "invalid");
+  assert.equal(mock.getCommits().length, 0);
+  console.log("✓ Autopick odmítne neplatného účastníka místo změny pořadí jeho odstraněním");
 }
 
 {

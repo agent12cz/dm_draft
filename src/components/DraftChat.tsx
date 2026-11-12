@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { User } from "firebase/auth";
 import type { Timestamp } from "firebase/firestore";
 import { getFirebaseClient } from "@/lib/firebase";
+import { callFirestoreWorker, getDraftPrivateAccess } from "@/lib/firestoreWorker";
 
 type DraftChatProps = {
   draftId?: string | null;
@@ -16,6 +17,9 @@ type DraftChatProps = {
 
 type DraftMessage = {
   id: string;
+  /** Opaque author identifier written by the Worker for new messages. */
+  authorId: string;
+  /** Legacy field kept only for messages stored before the privacy fix. */
   userId: string;
   displayName: string;
   role: "admin" | "participant";
@@ -48,6 +52,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [isParticipantAssigned, setIsParticipantAssigned] = useState(false);
+  const [chatAuthorId, setChatAuthorId] = useState<string | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
 
@@ -76,7 +81,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
       try {
         const { db, firestoreApi } = await getFirebaseClient();
         const draftQuery = firestoreApi.query(
-          firestoreApi.collection(db, "drafts"),
+          firestoreApi.collection(db, "publicDrafts"),
           firestoreApi.where("code", "==", draftCode),
         );
         const snapshot = await firestoreApi.getDocs(draftQuery);
@@ -113,34 +118,24 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
 
     void (async () => {
       try {
-        const { db, firestoreApi } = await getFirebaseClient();
-        if (!isMounted) {
-          return;
-        }
-
-        const draftRef = firestoreApi.doc(db, "drafts", resolvedDraftId);
-        unsubscribe = firestoreApi.onSnapshot(
-          draftRef,
-          (snapshot) => {
-            if (!snapshot.exists()) {
-              setIsParticipantAssigned(false);
-              return;
+        const refreshAccess = async () => {
+          try {
+            const access = await getDraftPrivateAccess(resolvedDraftId);
+            if (isMounted) {
+              setIsParticipantAssigned(access.authorized);
+              setChatAuthorId(access.chatAuthorId ?? null);
             }
-
-            const data = snapshot.data() as { participants?: Array<{ userId?: string; uid?: string }> };
-            const participants = data.participants ?? [];
-            const isAssigned = participants.some((participant) => {
-              const participantUid = participant.userId ?? participant.uid;
-              return Boolean(participantUid && currentUser.uid && participantUid === currentUser.uid);
-            });
-
-            setIsParticipantAssigned(isAssigned);
-          },
-          (draftError) => {
+          } catch (draftError) {
             console.error(draftError);
-            setChatError("Nepodařilo se načíst přístup k draftu.");
-          },
-        );
+            if (isMounted) {
+              setIsParticipantAssigned(false);
+              setChatError("Nepodařilo se načíst přístup k draftu.");
+            }
+          }
+        };
+        void refreshAccess();
+        const interval = window.setInterval(() => void refreshAccess(), 15_000);
+        unsubscribe = () => window.clearInterval(interval);
       } catch (draftError) {
         console.error(draftError);
         setChatError("Nepodařilo se načíst přístup k draftu.");
@@ -168,7 +163,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
           return;
         }
 
-        const messagesRef = firestoreApi.collection(db, "drafts", resolvedDraftId, "messages");
+        const messagesRef = firestoreApi.collection(db, "publicDrafts", resolvedDraftId, "messages");
         const messagesQuery = firestoreApi.query(messagesRef, firestoreApi.orderBy("createdAt", "asc"));
 
         unsubscribe = firestoreApi.onSnapshot(
@@ -179,6 +174,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
                 const data = document.data({ serverTimestamps: "estimate" }) as Partial<DraftMessage>;
                 return {
                   id: document.id,
+                  authorId: data.authorId ?? "",
                   userId: data.userId ?? "",
                   displayName: data.displayName ?? "Uživatel",
                   role: data.role === "admin" ? "admin" : "participant",
@@ -253,13 +249,9 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
     followLatestRef.current = true;
 
     try {
-      const { db, firestoreApi } = await getFirebaseClient();
-      await firestoreApi.addDoc(firestoreApi.collection(db, "drafts", resolvedDraftId, "messages"), {
-        userId: currentUser.uid,
-        displayName: currentUser.displayName?.trim() || currentUser.email?.split("@", 1)[0] || "Uživatel",
-        role: currentUserRole === "admin" ? "admin" : "participant",
+      await callFirestoreWorker("draft.message", {
+        draftId: resolvedDraftId,
         text: trimmedText,
-        createdAt: firestoreApi.serverTimestamp(),
       });
 
       setInputText("");
@@ -300,7 +292,9 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
           </div>
         ) : messages.length > 0 ? (
           messages.map((message) => {
-            const isOwnMessage = message.userId === currentUser.uid;
+            const isOwnMessage = message.authorId
+              ? message.authorId === chatAuthorId
+              : Boolean(message.userId) && message.userId === currentUser.uid;
             return (
               <div key={message.id} className={`flex ${isOwnMessage ? "justify-end" : "justify-start"}`}>
                 <div

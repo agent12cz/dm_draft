@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import { getFirebaseClient } from "@/lib/firebase";
+import { callFirestoreWorker } from "@/lib/firestoreWorker";
 
 type UserProfile = {
   uid: string;
@@ -26,7 +27,6 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-const PROFILE_MISSING_MESSAGE = "Uživatelský profil nebyl nalezen.";
 
 function getSafeRole(value: unknown): "admin" | "participant" {
   if (value === "admin") {
@@ -88,14 +88,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async function loadProfile(
       nextUser: User,
       requestId: number,
-      client: Awaited<ReturnType<typeof getFirebaseClient>>,
     ) {
-      const { db, firestoreApi } = client;
       let timeoutId: number | undefined;
 
       try {
-        const profileRef = firestoreApi.doc(db, "users", nextUser.uid);
-        const profileSnapshotPromise = firestoreApi.getDoc(profileRef);
+        const profileSnapshotPromise = callFirestoreWorker<{ profile: Partial<UserProfile> }>(
+          "profile.get",
+        );
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutId = window.setTimeout(() => {
             reject(new Error("PROFILE_LOAD_TIMEOUT"));
@@ -108,22 +107,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return;
         }
 
-        if (!profileSnapshot.exists()) {
-          if (isRegisteringRef.current) {
-            return;
-          }
-          setProfile(null);
-          setError(PROFILE_MISSING_MESSAGE);
-
-          if (!redirectIssuedRef.current) {
-            redirectIssuedRef.current = true;
-            redirectToLoginWithMessage(PROFILE_MISSING_MESSAGE);
-          }
-
-          return;
-        }
-
-        const profileData = profileSnapshot.data() as Partial<UserProfile>;
+        const profileData = profileSnapshot.profile;
         const resolvedDisplayName = profileData.displayName?.trim() || nextUser.displayName || nextUser.email || "Uživatel";
         const resolvedEmail = profileData.email?.trim() || nextUser.email || "";
         setProfile({
@@ -214,7 +198,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setError(null);
           setLoading(true);
 
-          void loadProfile(nextUser, requestId, client);
+          void loadProfile(nextUser, requestId);
         });
       } catch (initializationError) {
         console.error("FIREBASE AUTH INIT ERROR", initializationError);
@@ -271,23 +255,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const nextDisplayName = trimmedDisplayName || credentials.user.email?.split("@")[0] || "Uživatel";
 
     try {
-      const { auth, db, authApi, firestoreApi } = await getFirebaseClient();
+      const { auth, authApi } = await getFirebaseClient();
 
       await authApi.updateProfile(credentials.user, {
         displayName: nextDisplayName,
       });
 
-      await firestoreApi.setDoc(firestoreApi.doc(db, "users", credentials.user.uid), {
-        uid: credentials.user.uid,
-        displayName: nextDisplayName,
-        email: credentials.user.email ?? trimmedEmail,
-        role: "participant",
-        createdAt: firestoreApi.serverTimestamp(),
-        updatedAt: firestoreApi.serverTimestamp(),
-      });
-
-      const profileSnapshot = await firestoreApi.getDoc(firestoreApi.doc(db, "users", credentials.user.uid));
-      if (!profileSnapshot.exists()) {
+      await callFirestoreWorker("profile.save", { displayName: nextDisplayName });
+      const profileResponse = await callFirestoreWorker<{ profile: Partial<UserProfile> }>("profile.get");
+      if (!profileResponse.profile) {
         setError("Účet byl vytvořen, ale uživatelský profil se nepodařilo uložit.");
         await authApi.signOut(auth);
         isRegisteringRef.current = false;

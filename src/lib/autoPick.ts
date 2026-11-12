@@ -41,6 +41,12 @@ export type AutoPickUpdate = {
   status: "drafting" | "completed";
 };
 
+export function getDraftStatusAfterPick(
+  remainingItemIds: readonly string[],
+): AutoPickUpdate["status"] {
+  return remainingItemIds.length === 0 ? "completed" : "drafting";
+}
+
 export function buildAutomaticPickUpdate(draft: AutoPickDraft): AutoPickUpdate | null {
   const participantIndex = draft.pickOrder[draft.currentPickIndex];
   const participant = draft.participants[participantIndex];
@@ -67,10 +73,7 @@ export function buildAutomaticPickUpdate(draft: AutoPickDraft): AutoPickUpdate |
   const selectedItem = draft.draftItems.find((item) => item.id === selectedItemId);
   const nextPickIndex = draft.currentPickIndex + 1;
   const nextAvailableItemIds = draft.availableItemIds.filter((teamId) => teamId !== selectedItemId);
-  const nextStatus =
-    nextPickIndex >= draft.pickOrder.length || nextAvailableItemIds.length === 0
-      ? "completed"
-      : "drafting";
+  const nextStatus = getDraftStatusAfterPick(nextAvailableItemIds);
   const nextParticipants = draft.participants.map((currentParticipant, index) =>
     index === participantIndex
       ? { ...currentParticipant, picks: [...(currentParticipant.picks ?? []), selectedItemId] }

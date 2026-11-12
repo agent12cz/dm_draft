@@ -3,6 +3,8 @@ export type DraftItem = {
   name: string;
   sport: string;
   logo: string;
+  abbreviation?: string;
+  nameLines?: readonly [string, string];
 };
 
 export const defaultDraftItems: DraftItem[] = [
@@ -64,6 +66,7 @@ export function normalizeDraftItem(item: DraftItem | string | null | undefined):
       name,
       sport: typeof item.sport === "string" ? item.sport : "NHL",
       logo: logo || team?.logo || "",
+      abbreviation: typeof item.abbreviation === "string" ? item.abbreviation : undefined,
     };
   }
 
@@ -90,6 +93,39 @@ export function buildSnakeOrder(participantCount: number, itemCount: number) {
   }
 
   return order;
+}
+
+export function extendSnakeOrderForSkippedPick(
+  pickOrder: readonly number[],
+  participantCount: number,
+  currentPickIndex: number,
+  remainingItemCount: number,
+) {
+  if (
+    !Number.isInteger(participantCount) ||
+    participantCount <= 0 ||
+    !Number.isInteger(currentPickIndex) ||
+    currentPickIndex < 0 ||
+    !Number.isInteger(remainingItemCount) ||
+    remainingItemCount < 0
+  ) {
+    throw new RangeError("Invalid snake draft dimensions.");
+  }
+
+  const nextOrder = [...pickOrder];
+  const requiredTurnCount = currentPickIndex + 1 + remainingItemCount;
+  while (nextOrder.length < requiredTurnCount) {
+    const nextParticipantIndex = buildSnakeOrder(
+      participantCount,
+      nextOrder.length + 1,
+    )[nextOrder.length];
+    if (nextParticipantIndex === undefined) {
+      throw new RangeError("Could not extend the snake draft order.");
+    }
+    nextOrder.push(nextParticipantIndex);
+  }
+
+  return nextOrder;
 }
 
 export function calculateTargetBreakPrice(boxesCount: number, boxPrice: number, margin: number) {

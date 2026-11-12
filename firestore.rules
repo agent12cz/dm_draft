@@ -1,0 +1,41 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /publicDrafts/{draftId} {
+      allow read: if true;
+      allow write: if false;
+
+      match /messages/{messageId} {
+        allow read: if exists(/databases/$(database)/documents/publicDrafts/$(draftId));
+        allow write: if false;
+      }
+    }
+
+    match /products/{productId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /teamRankings/{rankingId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /draftPrivate/{draftId} {
+      allow read, write: if false;
+    }
+
+    match /users/{userId} {
+      allow read, write: if false;
+    }
+
+    match /drafts/{draftId} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
