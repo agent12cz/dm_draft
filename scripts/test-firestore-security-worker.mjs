@@ -196,9 +196,19 @@ function createFirestoreMock(initial = {}) {
     if (url.pathname.endsWith(":runQuery")) {
       const query = JSON.parse(init.body).structuredQuery;
       if (query.from[0].collectionId === "users") {
-        assert.equal(query.where.compositeFilter.op, "AND");
-        const filters = query.where.compositeFilter.filters;
-        assert.equal(new Set(filters.map((filter) => filter.fieldFilter.field.fieldPath)).size, 1);
+        if (query.where.compositeFilter) {
+          assert.equal(query.where.compositeFilter.op, "AND");
+          const fieldPaths = new Set(
+            query.where.compositeFilter.filters.map((filter) => filter.fieldFilter.field.fieldPath),
+          );
+          assert.deepEqual([...fieldPaths], ["displayName"]);
+        } else {
+          assert.equal(query.where.fieldFilter.op, "EQUAL");
+          assert.equal(query.where.fieldFilter.field.fieldPath, "email");
+        }
+        const filters = query.where.compositeFilter
+          ? query.where.compositeFilter.filters
+          : [query.where];
         assert.equal(query.limit, 20);
         assert.deepEqual(query.select.fields, [{ fieldPath: "displayName" }, { fieldPath: "email" }]);
         const results = [...documents.entries()]
@@ -217,6 +227,7 @@ function createFirestoreMock(initial = {}) {
               const { fieldPath } = filter.fieldFilter.field;
               const value = String(fields[fieldPath] ?? "");
               const boundary = filter.fieldFilter.value.stringValue;
+              if (filter.fieldFilter.op === "EQUAL") return value === boundary;
               return filter.fieldFilter.op === "GREATER_THAN_OR_EQUAL"
                 ? value >= boundary
                 : value <= boundary;
@@ -499,8 +510,10 @@ assert.equal(publicDraft.participants[0].userId, undefined);
 assert.equal(publicDraft.participants[0].email, undefined);
 assert.equal(publicDraft.participants[0].participantPin, undefined);
 assert.equal(privateDraft.ownerUserId, "owner");
-assert.equal(privateDraft.participants[0].email, "player1@example.test");
+assert.equal(privateDraft.participants[0].email, "");
+assert.equal(privateDraft.participants[1].email, "player2@example.test");
 console.log("✓ Draft creation stores ownership and participant credentials outside public documents");
+console.log("✓ An owner-side assignment never resolves a profile email the owner did not already know");
 
 {
   const productIds = {};
@@ -592,16 +605,27 @@ const nameMatches = await operation("owner", "draft.search-users", {
   prefix: "Player",
 });
 assert.deepEqual(nameMatches.users.map((user) => user.uid), ["player-1", "player-2"]);
+assert.ok(nameMatches.users.every((user) => user.email === undefined));
 const emailMatches = await operation("owner", "draft.search-users", {
   draftId: "ROOM1",
-  prefix: "player2@",
+  prefix: "player2@example.test",
 });
-assert.deepEqual(emailMatches.users.map((user) => user.uid), ["player-2"]);
+assert.deepEqual(emailMatches.users, [
+  { uid: "player-2", displayName: "Player Two", email: "player2@example.test" },
+]);
+// Email prefixes must never act as an enumeration oracle: only the exact,
+// complete address may match, so partial probes return nothing.
+for (const probe of ["player2@", "player2@e", "player2@example.tes", "PLAYER2@EXAMPLE.TES"]) {
+  assert.deepEqual(
+    (await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: probe })).users,
+    [],
+  );
+}
 await assert.rejects(
   operation("stranger", "draft.search-users", { draftId: "ROOM1", prefix: "Player" }),
   (error) => error.status === 403,
 );
-console.log("✓ Organizer user search applies bounded name/email prefix queries and requires ownership");
+console.log("✓ Organizer user search matches name prefixes and exact emails only; partial email probes return nothing");
 
 firestore.seed("users/dan", {
   userId: "dan",
@@ -612,10 +636,18 @@ firestore.seed("users/dan", {
 });
 const danSearch = await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "da" });
 assert.deepEqual(danSearch.users, [{ uid: "dan", displayName: "Dan" }]);
-for (const prefix of ["DA", "Da", "da", "reg", "REGISTERED@"]) {
+for (const prefix of ["DA", "Da", "da"]) {
   assert.deepEqual((await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix })).users,
     [{ uid: "dan", displayName: "Dan" }]);
 }
+// Partial email fragments no longer find anyone; the full address still does.
+for (const prefix of ["reg", "r", "REGISTERED@", "registered@example.tes"]) {
+  assert.deepEqual((await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix })).users, []);
+}
+assert.deepEqual(
+  (await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "registered@example.test" })).users,
+  [{ uid: "dan", displayName: "Dan", email: "registered@example.test" }],
+);
 firestore.seed("users/legacy-uid", { uid: "legacy-uid", displayName: "DANA", email: "legacy@example.test", role: "participant" });
 firestore.seed("users/document-uid", { uid: "forged", userId: "forged", displayName: "Daniel", role: "admin", privateData: "hidden" });
 const legacyMatches = await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "da" });
@@ -649,8 +681,17 @@ for (const uid of ["dan", "legacy-uid", "document-uid"]) {
   assert.equal(assigned.participants[0].userId, uid);
   await operation(uid, "draft.priorities", { draftId: "SEARCH-ASSIGN", priorities: ["team-b", "team-a"] });
   assert.deepEqual(firestore.read("draftPrivate/SEARCH-ASSIGN").playerPriorities[uid], ["team-b", "team-a"]);
-  assert.notEqual(firestore.read("draftPrivate/SEARCH-ASSIGN").participants[0].email, "forged@example.test");
+  // Assigning a uid with a guessed email must not resolve the real address.
+  assert.equal(firestore.read("draftPrivate/SEARCH-ASSIGN").participants[0].email, "");
+  const ownerView = await operation("owner", "draft.access", { draftId: "SEARCH-ASSIGN" });
+  assert.equal(ownerView.participants[0].email, "");
 }
+// Supplying the exact known address keeps it, matching the exact-email search flow.
+await operation("owner", "draft.update", {
+  draftId: "SEARCH-ASSIGN",
+  updates: { participants: [{ id: "slot", name: "Dan", userId: "dan", uid: "dan", email: "REGISTERED@example.test", picks: [] }] },
+});
+assert.equal(firestore.read("draftPrivate/SEARCH-ASSIGN").participants[0].email, "registered@example.test");
 await operation("owner", "draft.update", { draftId: "SEARCH-ASSIGN", updates: { status: "completed" } });
 await assert.rejects(
   operation("owner", "draft.search-users", { draftId: "SEARCH-ASSIGN", prefix: "da" }),
@@ -658,6 +699,30 @@ await assert.rejects(
 );
 console.log("✓ Legacy uid/userId profiles and mixed-case prefixes are found with only UID/name returned");
 console.log("✓ Only the organizer can search/assign before start; assigned players can save their own priorities");
+
+const sentMessage = await operation("player-1", "draft.message", { draftId: "ROOM1", text: "Ahoj!" });
+assert.equal(sentMessage.status, "sent");
+const storedMessage = firestore.read(`publicDrafts/ROOM1/messages/${sentMessage.messageId}`);
+assert.equal(storedMessage.userId, undefined);
+assert.equal(storedMessage.uid, undefined);
+assert.equal(storedMessage.displayName, "Player One");
+assert.equal(storedMessage.role, "participant");
+assert.equal(storedMessage.text, "Ahoj!");
+assert.match(storedMessage.authorId, /^[A-Za-z0-9_-]{22}$/);
+const authorAccess = await operation("player-1", "draft.access", { draftId: "ROOM1" });
+assert.equal(authorAccess.chatAuthorId, storedMessage.authorId);
+const readerAccess = await operation("player-2", "draft.access", { draftId: "ROOM1" });
+assert.notEqual(readerAccess.chatAuthorId, storedMessage.authorId);
+const crossDraftAccess = await operation("player-1", "draft.access", { draftId: "SEARCH-ASSIGN" });
+assert.notEqual(crossDraftAccess.chatAuthorId, storedMessage.authorId);
+const ownerMessage = await operation("owner", "draft.message", { draftId: "ROOM1", text: "Vítejte" });
+assert.equal(firestore.read(`publicDrafts/ROOM1/messages/${ownerMessage.messageId}`).role, "admin");
+assert.equal(firestore.read(`publicDrafts/ROOM1/messages/${ownerMessage.messageId}`).userId, undefined);
+await assert.rejects(
+  operation("stranger", "draft.message", { draftId: "ROOM1", text: "spy" }),
+  (error) => error.status === 403,
+);
+console.log("✓ Chat messages publish an opaque per-draft author ID instead of the sender's UID");
 
 let searchRequestCount = 0;
 const brokenSearchRequest = async (input, init) => {
@@ -1024,7 +1089,11 @@ const playerAccess = await operation("player-1", "draft.access", { draftId: "ROO
 const ownerAccess = await operation("owner", "draft.access", { draftId: "ROOM1" });
 assert.equal(playerAccess.role, "participant");
 assert.equal(playerAccess.participants[0].userId, "player-1");
-assert.equal(playerAccess.participants[0].email, "player1@example.test");
+// The forged address supplied at creation was never resolved to the profile email.
+assert.equal(playerAccess.participants[0].email, "");
+assert.equal(ownerAccess.participants[0].email, "");
+// The owner keeps an address only when it was already supplied correctly.
+assert.equal(ownerAccess.participants[1].email, "player2@example.test");
 assert.equal(playerAccess.participants[1].userId, undefined);
 const strangerAccess = await operation("stranger", "draft.access", { draftId: "ROOM1" });
 assert.equal(strangerAccess.authorized, false);

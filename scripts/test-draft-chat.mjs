@@ -128,7 +128,7 @@ runInNewContext(compiled, {
         writes.push({ operation, payload });
         return { status: "sent" };
       },
-      getDraftPrivateAccess: async () => ({ authorized: true }),
+      getDraftPrivateAccess: async () => ({ authorized: true, chatAuthorId: "own-author-id" }),
     };
     return require(name);
   },
@@ -215,6 +215,43 @@ emitMessages("Třetí zpráva");
 assert.equal(scrolls.length, 2);
 assert.equal(textarea().props.value, "Rozpracovaná zpráva");
 console.log("✓ Reading older messages suspends auto-scroll; returning to the bottom resumes it");
+
+listeners.get("publicDrafts/ABCDE/messages")({
+  docs: [
+    {
+      id: "legacy-foreign",
+      data: () => ({ userId: "admin-1", displayName: "Admin One", role: "admin", text: "Legacy cizí" }),
+    },
+    {
+      id: "legacy-own",
+      data: () => ({ userId: "player-1", displayName: "Player One", role: "participant", text: "Legacy vlastní" }),
+    },
+    {
+      id: "new-own",
+      data: () => ({ authorId: "own-author-id", displayName: "Player One", role: "participant", text: "Nová vlastní" }),
+    },
+    {
+      id: "new-foreign",
+      data: () => ({ authorId: "other-author-id", displayName: "Admin One", role: "admin", text: "Nová cizí" }),
+    },
+  ],
+});
+tree = render();
+const bubbles = [];
+(function collect(node) {
+  if (Array.isArray(node)) return node.forEach(collect);
+  if (!isValidElement(node)) return;
+  if (typeof node.props.className === "string" && /^flex justify-(end|start)$/.test(node.props.className)) {
+    bubbles.push({ own: node.props.className.includes("justify-end"), html: renderToStaticMarkup(node) });
+  }
+  collect(node.props.children);
+})(tree);
+assert.deepEqual(
+  bubbles.map((bubble) => bubble.own),
+  [false, true, true, false],
+);
+assert.doesNotMatch(renderToStaticMarkup(tree), /player-1|admin-1|own-author-id|other-author-id/);
+console.log("✓ Own messages are matched by the opaque author ID (with legacy userId fallback) and no identifier is rendered");
 
 let prevented = false;
 textarea().props.onKeyDown({ key: "Enter", shiftKey: true, preventDefault: () => { prevented = true; } });

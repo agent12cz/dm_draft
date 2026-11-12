@@ -17,6 +17,9 @@ type DraftChatProps = {
 
 type DraftMessage = {
   id: string;
+  /** Opaque author identifier written by the Worker for new messages. */
+  authorId: string;
+  /** Legacy field kept only for messages stored before the privacy fix. */
   userId: string;
   displayName: string;
   role: "admin" | "participant";
@@ -49,6 +52,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
   const [isSending, setIsSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [isParticipantAssigned, setIsParticipantAssigned] = useState(false);
+  const [chatAuthorId, setChatAuthorId] = useState<string | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
 
@@ -119,6 +123,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
             const access = await getDraftPrivateAccess(resolvedDraftId);
             if (isMounted) {
               setIsParticipantAssigned(access.authorized);
+              setChatAuthorId(access.chatAuthorId ?? null);
             }
           } catch (draftError) {
             console.error(draftError);
@@ -169,6 +174,7 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
                 const data = document.data({ serverTimestamps: "estimate" }) as Partial<DraftMessage>;
                 return {
                   id: document.id,
+                  authorId: data.authorId ?? "",
                   userId: data.userId ?? "",
                   displayName: data.displayName ?? "Uživatel",
                   role: data.role === "admin" ? "admin" : "participant",
@@ -286,7 +292,9 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
           </div>
         ) : messages.length > 0 ? (
           messages.map((message) => {
-            const isOwnMessage = message.userId === currentUser.uid;
+            const isOwnMessage = message.authorId
+              ? message.authorId === chatAuthorId
+              : Boolean(message.userId) && message.userId === currentUser.uid;
             return (
               <div key={message.id} className={`flex ${isOwnMessage ? "justify-end" : "justify-start"}`}>
                 <div

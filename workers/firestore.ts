@@ -1265,17 +1265,26 @@ async function resolveParticipantEmails(
       continue;
     }
     const oldUserId = previous[index]?.userId?.trim() ?? "";
+    if (userId === oldUserId) {
+      // The slot keeps the email stored when the player joined, claimed an
+      // invitation, or was assigned with the exact address already known.
+      resolved.push({ ...participant, email: previous[index]?.email ?? "" });
+      continue;
+    }
     const profile = await getUserProfile(request, accessToken, projectId, userId);
-    if (userId !== oldUserId && !profile) {
+    if (!profile) {
       throw new FirestoreSecurityError(400, "Participant must be an existing user.");
     }
+    // Never resolve a profile email through an owner-side assignment: keep it
+    // only when the caller already supplied the exact matching address, so an
+    // assignment cannot be used as a uid-to-email oracle.
+    const profileEmail = typeof profile.email === "string" ? profile.email.trim() : "";
+    const claimedEmail = typeof participant.email === "string" ? participant.email.trim() : "";
     resolved.push({
       ...participant,
-      email: typeof profile?.email === "string"
-        ? profile.email
-        : userId === oldUserId
-          ? previous[index]?.email ?? ""
-          : "",
+      email: profileEmail && claimedEmail.toLowerCase() === profileEmail.toLowerCase()
+        ? profileEmail
+        : "",
     });
   }
   return resolved;
@@ -1498,6 +1507,35 @@ async function createDraft(
     throw new FirestoreSecurityError(409, "Could not reserve a unique draft ID.");
   }
 
+let chatAuthorKeyCache: { secret: string; key: Promise<CryptoKey> } | null = null;
+
+/**
+ * Derives an opaque, per-draft author identifier for public chat messages so
+ * the raw Firebase UID never appears in publicly readable documents. The HMAC
+ * secret keeps the identifier unlinkable to a uid without server access.
+ */
+async function chatAuthorId(env: DraftWorkerEnv, draftId: string, userId: string) {
+  const secret = env.FIREBASE_SERVICE_ACCOUNT_JSON ?? "";
+  if (!chatAuthorKeyCache || chatAuthorKeyCache.secret !== secret) {
+    chatAuthorKeyCache = {
+      secret,
+      key: crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      ),
+    };
+  }
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await chatAuthorKeyCache.key,
+    new TextEncoder().encode(`chat-author:${draftId}:${userId}`),
+  );
+  return base64UrlEncode(new Uint8Array(signature)).slice(0, 22);
+}
+
   async function loadDraftForAccess(
     request: typeof fetch,
     projectId: string,
@@ -1517,6 +1555,7 @@ async function createDraft(
 
   async function getDraftAccess(
     request: typeof fetch,
+    env: DraftWorkerEnv,
     projectId: string,
     accessToken: string,
     actorId: string,
@@ -1547,6 +1586,7 @@ async function createDraft(
       playerPriorities: index >= 0
         ? privateFields.playerPriorities?.[actorId] ?? []
         : [],
+      chatAuthorId: await chatAuthorId(env, draftId, actorId),
     };
   }
 
@@ -2575,6 +2615,7 @@ async function createDraft(
 
   async function sendDraftMessage(
     request: typeof fetch,
+    env: DraftWorkerEnv,
     projectId: string,
     accessToken: string,
     actorId: string,
@@ -2601,7 +2642,9 @@ async function createDraft(
         const name = documentResource(projectId, `publicDrafts/${draftId}/messages`, messageId);
         const role = owner ? "admin" : "participant";
         const fields = {
-          userId: actorId,
+          // Public chat documents carry only an opaque author identifier;
+          // the sender's uid stays out of world-readable data.
+          authorId: await chatAuthorId(env, draftId, actorId),
           displayName: typeof profile.displayName === "string" ? profile.displayName : "Uživatel",
           role,
           text,
@@ -2641,12 +2684,18 @@ async function createDraft(
       throw new FirestoreSecurityError(403, "Only the draft owner may search users.");
     }
     const lowerPrefix = prefix.toLowerCase();
-    const variants = [...new Set([
-      prefix,
-      lowerPrefix,
-      prefix.toUpperCase(),
-      lowerPrefix.charAt(0).toUpperCase() + lowerPrefix.slice(1),
-    ])];
+    // Email lookups require the exact full address: prefix ranges over the
+    // email field would let a draft owner reconstruct every registered email
+    // character by character by watching when a uid enters the result set.
+    const emailQuery = lowerPrefix.includes("@");
+    const variants = emailQuery
+      ? [...new Set([prefix, lowerPrefix])]
+      : [...new Set([
+          prefix,
+          lowerPrefix,
+          prefix.toUpperCase(),
+          lowerPrefix.charAt(0).toUpperCase() + lowerPrefix.slice(1),
+        ])];
     const prefixRange = (fieldPath: string, value: string) => ({
       compositeFilter: {
         op: "AND",
@@ -2668,7 +2717,14 @@ async function createDraft(
         ],
       },
     });
-    const results = (await Promise.all(["displayName", "email"].flatMap((fieldPath) =>
+    const exactMatch = (fieldPath: string, value: string) => ({
+      fieldFilter: {
+        field: { fieldPath },
+        op: "EQUAL",
+        value: { stringValue: value },
+      },
+    });
+    const results = (await Promise.all(
       variants.map(async (value) => {
         const response = await request(`${firestoreDocumentsUrl(projectId)}:runQuery`, {
           method: "POST",
@@ -2680,29 +2736,35 @@ async function createDraft(
             structuredQuery: {
               from: [{ collectionId: "users" }],
               select: { fields: [{ fieldPath: "displayName" }, { fieldPath: "email" }] },
-              where: prefixRange(fieldPath, value),
-              orderBy: [{ field: { fieldPath }, direction: "ASCENDING" }],
+              where: emailQuery ? exactMatch("email", value) : prefixRange("displayName", value),
+              ...(emailQuery
+                ? {}
+                : { orderBy: [{ field: { fieldPath: "displayName" }, direction: "ASCENDING" }] }),
               limit: 20,
             },
           }),
         });
         return readJsonStream(response, "Firestore user search");
       }),
-    ))).flat();
+    )).flat();
     const seen = new Set<string>();
     const users = results.flatMap((result) => {
       const document = asDocument(result);
       if (!document?.name || !isRecord(document.fields)) return [];
       const user = decodeFirestoreFields(document.fields);
       const uid = document.name.split("/").at(-1) ?? "";
-      if (!uid || seen.has(uid) || (!String(user.displayName ?? "").toLowerCase().startsWith(prefix.toLowerCase()) &&
-        !String(user.email ?? "").toLowerCase().startsWith(prefix.toLowerCase()))) {
+      const matchesQuery = emailQuery
+        ? String(user.email ?? "").toLowerCase() === lowerPrefix
+        : String(user.displayName ?? "").toLowerCase().startsWith(lowerPrefix);
+      if (!uid || seen.has(uid) || !matchesQuery) {
         return [];
       }
       seen.add(uid);
       return [{
         uid,
         displayName: typeof user.displayName === "string" ? user.displayName : "",
+        // An exact-match search only echoes the address the caller typed.
+        ...(emailQuery && typeof user.email === "string" ? { email: user.email } : {}),
       }];
     });
     return { users: users.slice(0, 20) };
@@ -2999,6 +3061,7 @@ async function createDraft(
       case "draft.access":
         return getDraftAccess(
           request,
+          env,
           projectId,
           accessToken,
           actor.uid,
@@ -3027,7 +3090,7 @@ async function createDraft(
       case "draft.priorities":
         return savePlayerPriorities(request, projectId, accessToken, actor.uid, body);
       case "draft.message":
-        return sendDraftMessage(request, projectId, accessToken, actor.uid, globalAdmin, body);
+        return sendDraftMessage(request, env, projectId, accessToken, actor.uid, globalAdmin, body);
       case "draft.search-users":
         return searchDraftUsers(request, projectId, accessToken, actor.uid, globalAdmin, body);
       case "draft.delete":

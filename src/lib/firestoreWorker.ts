@@ -6,6 +6,8 @@ export type DraftPrivateAccess = {
   participantIndex: number | null;
   participants: Array<Record<string, unknown>>;
   playerPriorities: string[];
+  /** Opaque per-draft identifier of the caller's own chat messages. */
+  chatAuthorId?: string;
 };
 
 export class FirestoreWorkerError extends Error {
