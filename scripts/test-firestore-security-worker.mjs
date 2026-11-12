@@ -8,6 +8,7 @@ import {
   runExpiredDraftPicks,
   runLegacyDraftPrivacyMigration,
 } from "../workers/firestore.ts";
+import { resetRateLimits } from "../workers/rateLimit.ts";
 import { buildSnakeOrder, defaultDraftItems } from "../src/lib/snakeDraft.ts";
 import { getTeamsForSport } from "../src/lib/sportsTeams.ts";
 
@@ -600,6 +601,7 @@ console.log("✓ An owner-side assignment never resolves a profile email the own
   console.log("✓ NHL, NBA, NFL and MLB drafts create, start, pick every league team, and reject mismatched rosters");
 }
 
+resetRateLimits();
 const nameMatches = await operation("owner", "draft.search-users", {
   draftId: "ROOM1",
   prefix: "Player",
@@ -648,6 +650,102 @@ assert.deepEqual(
   (await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "registered@example.test" })).users,
   [{ uid: "dan", displayName: "Dan", email: "registered@example.test" }],
 );
+
+resetRateLimits();
+for (let attempt = 0; attempt < 10; attempt += 1) {
+  const allowed = await operation("owner", "draft.search-users", {
+    draftId: "ROOM1",
+    prefix: `probe-${attempt}@example.test`,
+  });
+  assert.deepEqual(allowed.users, []);
+}
+await assert.rejects(
+  operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "player2@example.test" }),
+  (error) => error.status === 429 && /email lookups/i.test(error.message),
+);
+// Name searches keep working while the email budget is exhausted.
+assert.deepEqual(
+  (await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "Player" })).users
+    .map((user) => user.uid),
+  ["player-1", "player-2"],
+);
+// Every UID has its own independent email budget.
+assert.deepEqual(
+  (await operation("global-admin", "draft.search-users", { draftId: "ROOM1", prefix: "player2@example.test" })).users,
+  [{ uid: "player-2", displayName: "Player Two", email: "player2@example.test" }],
+);
+// The exhausted owner stays blocked even for an otherwise valid exact address.
+await assert.rejects(
+  operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "registered@example.test" }),
+  (error) => error.status === 429,
+);
+// Once the 60-second window passes, email lookups are allowed again.
+{
+  const realDateNow = Date.now;
+  try {
+    Date.now = () => realDateNow() + 61_000;
+    const afterWindow = await operation("owner", "draft.search-users", {
+      draftId: "ROOM1",
+      prefix: "player2@example.test",
+    });
+    assert.deepEqual(afterWindow.users, [
+      { uid: "player-2", displayName: "Player Two", email: "player2@example.test" },
+    ]);
+  } finally {
+    Date.now = realDateNow;
+  }
+}
+resetRateLimits();
+console.log("✓ Exact-email lookups are throttled to 10 per minute per UID; name searches and other users stay unaffected");
+console.log("✓ The email budget recovers after the 60-second window");
+
+// The participant-assignment path cannot be used as an unlimited email oracle:
+// mismatched email claims share the same per-UID budget as exact searches.
+firestore.seed("publicDrafts/EMAIL-PROBE", {
+  title: "Probe", status: "waiting", participantCount: 1,
+  participants: [{ id: "slot", name: "", picks: [] }],
+});
+firestore.seed("draftPrivate/EMAIL-PROBE", { ownerUserId: "owner", participants: [{}], playerPriorities: {} });
+resetRateLimits();
+for (let attempt = 0; attempt < 10; attempt += 1) {
+  await operation("owner", "draft.update", {
+    draftId: "EMAIL-PROBE",
+    updates: { participants: [{ id: "slot", name: "Dan", userId: "dan", uid: "dan", email: ` GUESS-${attempt}@Example.TEST `, picks: [] }] },
+  });
+  assert.equal(firestore.read("draftPrivate/EMAIL-PROBE").participants[0].email, "");
+  await operation("owner", "draft.update", {
+    draftId: "EMAIL-PROBE",
+    updates: { participants: [{ id: "slot", name: "", userId: "", uid: "", email: "", picks: [] }] },
+  });
+}
+await assert.rejects(
+  operation("owner", "draft.update", {
+    draftId: "EMAIL-PROBE",
+    updates: { participants: [{ id: "slot", name: "Dan", userId: "dan", uid: "dan", email: "guess-x@example.test", picks: [] }] },
+  }),
+  (error) => error.status === 429,
+);
+// The shared budget also blocks the search channel once exhausted via claims.
+await assert.rejects(
+  operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "player2@example.test" }),
+  (error) => error.status === 429,
+);
+// Assignments without an email and with the exactly known address stay free.
+await operation("owner", "draft.update", {
+  draftId: "EMAIL-PROBE",
+  updates: { participants: [{ id: "slot", name: "Dan", userId: "dan", uid: "dan", email: "", picks: [] }] },
+});
+await operation("owner", "draft.update", {
+  draftId: "EMAIL-PROBE",
+  updates: { participants: [{ id: "slot", name: "", userId: "", uid: "", email: "", picks: [] }] },
+});
+await operation("owner", "draft.update", {
+  draftId: "EMAIL-PROBE",
+  updates: { participants: [{ id: "slot", name: "Dan", userId: "dan", uid: "dan", email: "REGISTERED@example.test", picks: [] }] },
+});
+assert.equal(firestore.read("draftPrivate/EMAIL-PROBE").participants[0].email, "registered@example.test");
+resetRateLimits();
+console.log("✓ Mismatched email claims in assignments share the email budget; known addresses and plain assignments stay free");
 firestore.seed("users/legacy-uid", { uid: "legacy-uid", displayName: "DANA", email: "legacy@example.test", role: "participant" });
 firestore.seed("users/document-uid", { uid: "forged", userId: "forged", displayName: "Daniel", role: "admin", privateData: "hidden" });
 const legacyMatches = await operation("owner", "draft.search-users", { draftId: "ROOM1", prefix: "da" });

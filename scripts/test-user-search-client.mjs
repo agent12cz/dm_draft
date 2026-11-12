@@ -61,6 +61,10 @@ const invalidResponse = await route.POST(request());
 assert.equal(invalidResponse.status, 400);
 const invalidBody = await invalidResponse.json();
 assert.equal(invalidBody.message, "Invalid search prefix.");
+workerError = new FirestoreSecurityError(429, "Too many email lookups. Try again in a minute.");
+const limitedResponse = await route.POST(request());
+assert.equal(limitedResponse.status, 429);
+assert.deepEqual(await limitedResponse.json(), { status: "rate-limited" });
 processEnv.NODE_ENV = "production";
 workerError = new FirestoreHttpError("Sensitive upstream body", 400, "Firestore user search", "INVALID_ARGUMENT");
 assert.deepEqual(await (await route.POST(request())).json(), { status: "failed" });
@@ -69,8 +73,13 @@ console.log("✓ Validation and upstream errors are distinct; local diagnostics 
 let status = 400;
 const client = load("../src/lib/firestoreWorker.ts", {
   "@/lib/firebase": { getFirebaseClient: async () => ({ auth: { currentUser: { getIdToken: async () => "test-token" } } }) },
-}, { fetch: async () => Response.json(status === 400 ? invalidBody : { status: "failed" }, { status }) });
+}, { fetch: async () => Response.json(
+  status === 400 ? invalidBody : status === 429 ? { status: "rate-limited" } : { status: "failed" },
+  { status },
+) });
 await assert.rejects(client.callFirestoreWorker("draft.search-users"), /Invalid search prefix/);
+status = 429;
+await assert.rejects(client.callFirestoreWorker("draft.search-users"), /Příliš mnoho požadavků/);
 status = 502;
 await assert.rejects(client.callFirestoreWorker("draft.search-users"), /serveru/);
 console.log("✓ Client preserves safe validation details and distinguishes a server-side failure");

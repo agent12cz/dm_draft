@@ -10,6 +10,7 @@ import { getProductSport, isProductSport, type ProductSport } from "../src/lib/p
 import { createSportRankingKey } from "../src/lib/rankings";
 import { getTeamsForSport } from "../src/lib/sportsTeams";
 import { extendSnakeOrderForSkippedPick } from "../src/lib/snakeDraft";
+import { consumeRateLimit } from "./rateLimit";
 
 export type DraftWorkerEnv = {
   FIREBASE_PROJECT_ID: string;
@@ -1253,6 +1254,7 @@ async function resolveParticipantEmails(
   request: typeof fetch,
   accessToken: string,
   projectId: string,
+  actorId: string,
   incoming: DraftPrivateParticipant[],
   previous: DraftPrivateParticipant[],
 ) {
@@ -1280,11 +1282,19 @@ async function resolveParticipantEmails(
     // assignment cannot be used as a uid-to-email oracle.
     const profileEmail = typeof profile.email === "string" ? profile.email.trim() : "";
     const claimedEmail = typeof participant.email === "string" ? participant.email.trim() : "";
+    const claimMatches = Boolean(profileEmail) &&
+      claimedEmail.toLowerCase() === profileEmail.toLowerCase();
+    if (claimedEmail && !claimMatches) {
+      // A mismatched claim is an email-existence probe equivalent to an exact
+      // email search, so it consumes the same per-UID budget. Matching claims
+      // and empty addresses stay free for regular assignment flows.
+      if (!consumeRateLimit(`email-search:${actorId}`, EMAIL_SEARCH_LIMIT, EMAIL_SEARCH_WINDOW_MS)) {
+        throw new FirestoreSecurityError(429, "Too many email lookups. Try again in a minute.");
+      }
+    }
     resolved.push({
       ...participant,
-      email: profileEmail && claimedEmail.toLowerCase() === profileEmail.toLowerCase()
-        ? profileEmail
-        : "",
+      email: claimMatches ? profileEmail : "",
     });
   }
   return resolved;
@@ -1391,6 +1401,7 @@ async function createDraft(
       request,
       accessToken,
       projectId,
+      actorId,
       privateParticipants,
       [],
     );
@@ -2198,6 +2209,7 @@ async function chatAuthorId(env: DraftWorkerEnv, draftId: string, userId: string
           request,
           accessToken,
           projectId,
+          actorId,
           privateParticipants,
           context.privateFields.participants ?? [],
         );
@@ -2326,6 +2338,7 @@ async function chatAuthorId(env: DraftWorkerEnv, draftId: string, userId: string
         request,
         accessToken,
         projectId,
+        actorId,
         privateParticipants,
         context.privateFields.participants ?? [],
       );
@@ -2416,6 +2429,7 @@ async function chatAuthorId(env: DraftWorkerEnv, draftId: string, userId: string
         request,
         accessToken,
         projectId,
+        actorId,
         privateParticipants,
         context.privateFields.participants ?? [],
       );
@@ -2668,6 +2682,11 @@ async function chatAuthorId(env: DraftWorkerEnv, draftId: string, userId: string
     return message;
   }
 
+  // Dedicated budget for exact-email lookups (queries containing "@"); name
+  // searches are intentionally not limited here.
+  const EMAIL_SEARCH_LIMIT = 10;
+  const EMAIL_SEARCH_WINDOW_MS = 60_000;
+
   async function searchDraftUsers(
     request: typeof fetch,
     projectId: string,
@@ -2688,6 +2707,17 @@ async function chatAuthorId(env: DraftWorkerEnv, draftId: string, userId: string
     // email field would let a draft owner reconstruct every registered email
     // character by character by watching when a uid enters the result set.
     const emailQuery = lowerPrefix.includes("@");
+    if (
+      emailQuery &&
+      !consumeRateLimit(`email-search:${actorId}`, EMAIL_SEARCH_LIMIT, EMAIL_SEARCH_WINDOW_MS)
+    ) {
+      // Best-effort, per-isolate throttle against bulk dictionary probing of
+      // registered addresses; it is not a global guarantee across isolates.
+      throw new FirestoreSecurityError(
+        429,
+        "Too many email lookups. Try again in a minute.",
+      );
+    }
     const variants = emailQuery
       ? [...new Set([prefix, lowerPrefix])]
       : [...new Set([

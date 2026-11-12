@@ -53,6 +53,7 @@ export async function callFirestoreWorker<T>(
       conflict: "Draft se mezitím změnil. Zkontrolujte aktuální údaje a opakujte akci.",
       missing: "Požadovaný záznam nebyl nalezen.",
       "already-exists": "Záznam již existuje.",
+      "rate-limited": "Příliš mnoho požadavků. Zkuste akci za chvíli opakovat.",
     };
     throw new FirestoreWorkerError(
       response.status,

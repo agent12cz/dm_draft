@@ -89,6 +89,7 @@ export async function POST(request: Request) {
       if (error.status === 403) return jsonResponse(403, { status: "forbidden" });
       if (error.status === 404) return jsonResponse(404, { status: "missing" });
       if (error.status === 409) return jsonResponse(409, { status: "conflict" });
+      if (error.status === 429) return jsonResponse(429, { status: "rate-limited" });
       if (error.status === 400) {
         if (process.env.NODE_ENV === "development") {
           console.error("Firestore API request rejected.", {
