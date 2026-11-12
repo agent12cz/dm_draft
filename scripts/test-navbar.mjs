@@ -97,4 +97,24 @@ console.log("✓ Pending authentication never renders the signed-out controls");
   console.log("✓ Logout errors remain visible without pretending the user is signed out");
 }
 
+{
+  const signedOut = menu();
+  const signedOutHelp = findElement(signedOut, (node) => node.props?.href === "/navod");
+  assert.ok(signedOutHelp, "signed-out menu links the manual");
+  assert.equal(signedOutHelp.props.target, undefined);
+  assert.match(renderToStaticMarkup(signedOut), /Jak hrát/);
+
+  for (const overrides of [{ userLabel: "Hráč" }, { loading: true }]) {
+    const html = renderToStaticMarkup(menu(overrides));
+    assert.match(html, /href="\/navod"/);
+    assert.match(html, /Jak hrát/);
+  }
+
+  const inDraftRoom = menu({ userLabel: "Hráč", helpOpensInNewTab: true });
+  const roomHelp = findElement(inDraftRoom, (node) => node.props?.href === "/navod");
+  assert.equal(roomHelp.props.target, "_blank");
+  assert.equal(roomHelp.props.rel, "noopener noreferrer");
+  console.log("✓ The Jak hrát manual link is always visible and opens in a new tab inside draft rooms");
+}
+
 console.log("\nALL NAVBAR RENDERING TESTS PASSED!");
