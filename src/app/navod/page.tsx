@@ -5,7 +5,7 @@ import { PageContainer } from "@/components/PageContainer";
 import { Card } from "@/components/Card";
 
 export const metadata: Metadata = {
-  title: "Jak hrát – DM Draft",
+  title: "Jak se účastnit DM Draftu",
   description: "Kompletní návod pro hráče DM Draftu: registrace, pozvánky, priority týmů, průběh Snake draftu i automatický výběr.",
 };
 
@@ -63,7 +63,7 @@ export default function HowToPlayPage() {
               Návod pro hráče
             </p>
             <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-              Jak hrát DM Draft
+              Jak se účastnit DM Draftu
             </h1>
             <p className="text-lg text-slate-400">
               Vše, co potřebujete vědět od prvního přihlášení až po dokončený draft.
@@ -123,7 +123,7 @@ export default function HowToPlayPage() {
           </ChapterCard>
 
           <ChapterCard id="pripojeni" title="3. Připojení osobní pozvánkou nebo kódem">
-            <p>Do draftu se dostanete třemi způsoby:</p>
+            <p>Do draftu se dostanete dvěma způsoby:</p>
             <ul className="list-inside list-disc space-y-2">
               <li>
                 <strong>Osobní pozvánkou</strong> — organizátor vám pošle odkaz ve tvaru{" "}
@@ -139,11 +139,6 @@ export default function HowToPlayPage() {
                 zadejte kód, který vám organizátor sdělil (např.{" "}
                 <code className="text-[#8ef0b5]">HM85L</code>). Funguje, pokud už
                 v draftu máte přiřazenou pozici.
-              </li>
-              <li>
-                <strong>Volnou pozicí</strong> — pokud má čekající draft volná místa,
-                můžete se na stránce draftu připojit tlačítkem{" "}
-                <strong>„Připojit se k draftu“</strong> a obsadit první volnou pozici.
               </li>
             </ul>
             <p>
@@ -167,7 +162,7 @@ export default function HowToPlayPage() {
               <li><strong>Chat</strong> — komunikace s ostatními účastníky (kapitola 9).</li>
             </ul>
             <Hint>
-              💡 Tlačítko <strong>„Jak hrát“</strong> v horní liště otevře tento návod
+              💡 Tlačítko <strong>„Manuál“</strong> v horní liště otevře tento návod
               v nové záložce, takže o dění v místnosti nepřijdete.
             </Hint>
           </ChapterCard>
