@@ -1411,7 +1411,7 @@ function DraftDetailPageContent() {
   if (isLoading) {
     return (
       <div className="min-h-screen text-slate-100">
-        <Navbar />
+        <Navbar helpOpensInNewTab />
         <PageContainer className="py-8 lg:py-10">
           <div className="mx-auto flex max-w-6xl flex-col gap-6">
             <Card className="space-y-4">
@@ -1431,7 +1431,7 @@ function DraftDetailPageContent() {
   if (!draft) {
     return (
       <div className="print-draft-page min-h-screen text-slate-100">
-        <Navbar />
+        <Navbar helpOpensInNewTab />
         <PageContainer className="py-8 lg:py-10">
           <div className="mx-auto flex max-w-6xl flex-col gap-6">
             <Card className="space-y-4">
@@ -1467,7 +1467,7 @@ function DraftDetailPageContent() {
 
   return (
     <div className="print-draft-page min-h-screen text-slate-100">
-      <Navbar />
+      <Navbar helpOpensInNewTab />
       <PageContainer className={isDraftWaiting ? "py-4 lg:py-6" : "py-8 lg:py-10"}>
         <div className="mx-auto flex max-w-7xl flex-col gap-3 print:hidden">
           <div className="grid items-start gap-3 lg:grid-cols-2 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1fr)]">

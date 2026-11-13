@@ -893,7 +893,7 @@ export default function PlayerDraftPage() {
   if (authLoading || isLoading) {
     return (
       <div className="min-h-screen text-slate-100">
-        <Navbar />
+        <Navbar helpOpensInNewTab />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
             <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">Hráčský režim</p>
@@ -907,7 +907,7 @@ export default function PlayerDraftPage() {
   if (!user) {
     return (
       <div className="min-h-screen text-slate-100">
-        <Navbar />
+        <Navbar helpOpensInNewTab />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
             <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">Hráčský režim</p>
@@ -928,7 +928,7 @@ export default function PlayerDraftPage() {
   if (!draft) {
     return (
       <div className="min-h-screen text-slate-100">
-        <Navbar />
+        <Navbar helpOpensInNewTab />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
             <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">Hráčský režim</p>
@@ -942,7 +942,7 @@ export default function PlayerDraftPage() {
   if (!hasPlayAccess) {
     return (
       <div className="min-h-screen text-slate-100">
-        <Navbar />
+        <Navbar helpOpensInNewTab />
         <PageContainer className="py-8 lg:py-10">
           <Card className="mx-auto max-w-6xl p-6">
             <p className="text-sm font-medium uppercase tracking-[0.28em] text-[#18C964]">Hráčský režim</p>
@@ -978,7 +978,7 @@ export default function PlayerDraftPage() {
 
   return (
     <div className="min-h-screen text-slate-100">
-      <Navbar />
+      <Navbar helpOpensInNewTab />
 
       {pickAnnouncements[0]?.scope === `${draft.id}:${user?.uid}` && hasPlayAccess ? (
         <PickAnnouncement key={pickAnnouncements[0].id} event={pickAnnouncements[0]} onComplete={finishPickAnnouncement} />

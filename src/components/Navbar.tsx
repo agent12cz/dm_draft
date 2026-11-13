@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 
-export function Navbar() {
+export function Navbar({ helpOpensInNewTab = false }: { helpOpensInNewTab?: boolean } = {}) {
   const router = useRouter();
   const { user, profile, loading, isAdmin, signOut } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -72,6 +72,7 @@ export function Navbar() {
             : null}
           isLoggingOut={isLoggingOut}
           logoutError={logoutError}
+          helpOpensInNewTab={helpOpensInNewTab}
           onLogout={() => void handleLogout()}
         />
       </div>
@@ -84,16 +85,38 @@ export function NavbarAccountMenu({
   userLabel,
   isLoggingOut,
   logoutError,
+  helpOpensInNewTab = false,
   onLogout,
 }: {
   loading: boolean;
   userLabel: string | null;
   isLoggingOut: boolean;
   logoutError: string | null;
+  helpOpensInNewTab?: boolean;
   onLogout: () => void;
 }) {
   return (
     <nav aria-label="Uživatelský účet" className="flex min-w-0 flex-wrap items-center gap-2 text-sm md:gap-3">
+      <Link
+        href="/navod"
+        {...(helpOpensInNewTab ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+        className="flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5 font-semibold text-slate-200 transition hover:bg-slate-800"
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="h-4 w-4 shrink-0 text-[#8ef0b5]"
+        >
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" />
+        </svg>
+        Manuál
+      </Link>
       {loading ? (
         <span role="status" className="text-xs text-slate-400">Načítám přihlášení…</span>
       ) : userLabel !== null ? (
