@@ -244,7 +244,9 @@ function ProductsPageContent() {
               href="/rankings"
               className="inline-flex items-center gap-2 rounded-2xl border border-[#18C964]/30 bg-[#18C964]/10 px-4 py-2.5 text-xs font-bold text-[#8ef0b5] transition hover:bg-[#18C964]/20 self-start sm:self-auto"
             >
-              <span>🏒 Žebříčky atraktivity týmů</span>
+              <span>
+  {selectedSport === "NHL" ? "🏒" : selectedSport === "NBA" ? "🏀" : selectedSport === "NFL" ? "🏈" : selectedSport === "MLB" ? "⚾" : "⚽"} Žebříčky atraktivity týmů
+</span>
               <span>→</span>
             </Link>
           </div>
