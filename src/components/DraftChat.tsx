@@ -110,43 +110,38 @@ export function DraftChat({ draftId, draftCode, currentUser, currentUserRole, cl
 
   useEffect(() => {
     if (!resolvedDraftId || !currentUser) {
+      setIsParticipantAssigned(false);
+      setChatAuthorId(null);
       return;
     }
 
-    let unsubscribe: (() => void) | null = null;
+    const activeDraftId = resolvedDraftId;
     let isMounted = true;
+    setIsParticipantAssigned(false);
+    setChatAuthorId(null);
 
-    void (async () => {
+    async function refreshAccess() {
       try {
-        const refreshAccess = async () => {
-          try {
-            const access = await getDraftPrivateAccess(resolvedDraftId);
-            if (isMounted) {
-              setIsParticipantAssigned(access.authorized);
-              setChatAuthorId(access.chatAuthorId ?? null);
-            }
-          } catch (draftError) {
-            console.error(draftError);
-            if (isMounted) {
-              setIsParticipantAssigned(false);
-              setChatError("Nepodařilo se načíst přístup k draftu.");
-            }
-          }
-        };
-        void refreshAccess();
-        const interval = window.setInterval(() => void refreshAccess(), 15_000);
-        unsubscribe = () => window.clearInterval(interval);
+        const access = await getDraftPrivateAccess(activeDraftId);
+        if (!isMounted) return;
+        setIsParticipantAssigned(access.authorized);
+        setChatAuthorId(access.chatAuthorId ?? null);
+        setChatError(null);
       } catch (draftError) {
         console.error(draftError);
+        if (!isMounted) return;
+        setIsParticipantAssigned(false);
+        setChatAuthorId(null);
         setChatError("Nepodařilo se načíst přístup k draftu.");
       }
-    })();
+    }
+
+    void refreshAccess();
 
     return () => {
       isMounted = false;
-      unsubscribe?.();
     };
-  }, [currentUser, resolvedDraftId]);
+  }, [currentUser?.uid, resolvedDraftId]);
 
   useEffect(() => {
     if (!resolvedDraftId) {

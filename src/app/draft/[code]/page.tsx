@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
 import { PageContainer } from "@/components/PageContainer";
@@ -184,7 +183,6 @@ function DraftDetailPageContent() {
   const [isSubmittingTurnAction, setIsSubmittingTurnAction] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   const [draftCodeCopyFeedback, setDraftCodeCopyFeedback] = useState<string | null>(null);
-  const [viewerLinkCopyFeedback, setViewerLinkCopyFeedback] = useState<string | null>(null);
   const [playerLinkCopyFeedback, setPlayerLinkCopyFeedback] = useState<string | null>(null);
   const [startDraftMessage, setStartDraftMessage] = useState<string | null>(null);
   const [userSearch, setUserSearch] = useState("");
@@ -806,25 +804,6 @@ function DraftDetailPageContent() {
       }
     } catch {
       setDraftCodeCopyFeedback("Kód draftu se nepodařilo zkopírovat.");
-    }
-  }
-
-  async function handleCopyViewerLink() {
-    if (!draft) {
-      return;
-    }
-
-    const viewerLink = `${window.location.origin}/view/${draft.code}`;
-
-    try {
-      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(viewerLink);
-        setViewerLinkCopyFeedback("Viewer odkaz byl zkopírován.");
-      } else {
-        setViewerLinkCopyFeedback("Viewer odkaz se nepodařilo zkopírovat.");
-      }
-    } catch {
-      setViewerLinkCopyFeedback("Viewer odkaz se nepodařilo zkopírovat.");
     }
   }
 
@@ -1602,21 +1581,14 @@ function DraftDetailPageContent() {
                   </div>
                 ) : null}
                 <span className="text-xs text-slate-400">Aktuálně: {formatTurnDurationLabel(draft.turnDurationSeconds)}</span>
-                <Link
-                  href={`/view/${draft.code}`}
-                  className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
-                >
-                  Viewer
-                </Link>
                 <button type="button" onClick={() => void handleCopyDraftCode()} className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">Kopírovat kód</button>
-                <button type="button" onClick={() => void handleCopyViewerLink()} className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">Viewer odkaz</button>
                 <button type="button" onClick={() => void handleCopyPlayerLink()} className="rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">Hráčský odkaz</button>
               </div>
             </div>
 
-            {error || startDraftMessage || joinMessage || copyFeedback || draftCodeCopyFeedback || viewerLinkCopyFeedback || playerLinkCopyFeedback ? (
+            {error || startDraftMessage || joinMessage || copyFeedback || draftCodeCopyFeedback || playerLinkCopyFeedback ? (
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                {[error, startDraftMessage, joinMessage, copyFeedback, draftCodeCopyFeedback, viewerLinkCopyFeedback, playerLinkCopyFeedback]
+                {[error, startDraftMessage, joinMessage, copyFeedback, draftCodeCopyFeedback, playerLinkCopyFeedback]
                   .filter((message): message is string => Boolean(message))
                   .map((message) => (
                     <p key={message} className={message.includes("nepodařilo") || message.includes("Nepodařilo") ? "text-red-300" : "text-[#8ef0b5]"}>{message}</p>
