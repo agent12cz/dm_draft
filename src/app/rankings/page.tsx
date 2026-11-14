@@ -716,7 +716,9 @@ function RankingsPageContent() {
                 </div>
               ) : sportRankings.length === 0 ? (
                 <div className="rounded-3xl border border-dashed border-slate-800 bg-slate-950/40 p-10 text-center">
-                  <p className="text-4xl">🏒</p>
+                  <p className="text-4xl">
+  {selectedSport === "NHL" ? "🏒" : selectedSport === "NBA" ? "🏀" : selectedSport === "NFL" ? "🏈" : selectedSport === "MLB" ? "⚾" : "⚽"}
+</p>
                   <h4 className="mt-3 text-lg font-bold text-white">Zatím není vytvořen žádný žebříček</h4>
                   <p className="mt-1 text-sm text-slate-400">
                     Vytvořte první žebříček atraktivity pro libovolný ročník a sérii boxu.

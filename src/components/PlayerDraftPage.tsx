@@ -1317,7 +1317,9 @@ export default function PlayerDraftPage() {
                   : "text-slate-300 hover:bg-slate-900"
               }`}
             >
-              <span>🏒 Týmy</span>
+              <span>
+  {draft?.sport === "NBA" ? "🏀" : draft?.sport === "NFL" ? "🏈" : draft?.sport === "MLB" ? "⚾" : "🏒"} Týmy
+</span>
               <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${mobileTab === "teams" ? "bg-slate-950/20 text-slate-950" : "bg-slate-800 text-slate-300"}`}>
                 {availableItems.length}
               </span>
@@ -1425,7 +1427,7 @@ export default function PlayerDraftPage() {
                               : "border border-slate-800 bg-slate-950/70 text-slate-300 hover:bg-slate-900 hover:text-white"
                           }`}
                         >
-                          <span>🏒 Týmy k výběru</span>
+                          <span>{draft?.sport === "NBA" ? "🏀" : draft?.sport === "NFL" ? "🏈" : draft?.sport === "MLB" ? "⚾" : "🏒"} Týmy k výběru</span>
                           <span
                             className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
                               activePrimaryTab === "teams"
@@ -1601,7 +1603,9 @@ export default function PlayerDraftPage() {
                             </div>
                           ) : (
                             <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-950/40 p-8 text-center">
-                              <p className="text-3xl">🏒</p>
+                              <p className="text-3xl">
+  {draft?.sport === "NBA" ? "🏀" : draft?.sport === "NFL" ? "🏈" : draft?.sport === "MLB" ? "⚾" : "🏒"}
+</p>
                               <p className="mt-2 text-sm font-bold text-slate-300">Žádné dostupné týmy</p>
                               <p className="mt-1 text-xs text-slate-500">
                                 {teamSearch
@@ -2012,7 +2016,9 @@ export default function PlayerDraftPage() {
                   </div>
                 ) : (
                   <div className="mt-4 rounded-2xl border border-dashed border-slate-800 bg-slate-950/40 p-6 text-center">
-                    <p className="text-3xl">🏒</p>
+                    <p className="text-3xl">
+  {draft?.sport === "NBA" ? "🏀" : draft?.sport === "NFL" ? "🏈" : draft?.sport === "MLB" ? "⚾" : "🏒"}
+</p>
                     <p className="mt-2 text-xs font-bold text-slate-300">Zatím jste nevybrali žádný tým</p>
                     <p className="mt-1 text-[11px] text-slate-500">
                       Jakmile na vás přijde řada, klikněte na tlačítko „Vybrat“ u vašeho preferovaného týmu.
